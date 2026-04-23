@@ -237,14 +237,50 @@ pub(crate) unsafe extern "C" fn lua_jni_methods(L: *mut ffi::lua_State) -> std::
     }
     let cls_name = std::ffi::CStr::from_ptr(cls_c).to_string_lossy();
 
-    // 直接调 Rust JNI 反射 (不经过 JS 引擎, 避免死锁)
     let env = get_env(L);
     if env.is_null() { ffi::lua_pushnil(L); return 1; }
 
-    // 确保 reflect IDs 已初始化
-    crate::jsapi::java::reflect::ensure_reflect_ids(env);
+    // 测试: 只做 FindClass + getDeclaredMethods, 不走 enumerate_methods
+    let cls = crate::jsapi::java::reflect::find_class_safe(env, &cls_name);
+    crate::jsapi::console::output_message(&format!("[lua] _methods: cls={:?}", cls));
+    if cls.is_null() { ffi::lua_pushnil(L); return 1; }
 
-    let methods = match crate::jsapi::java::reflect::enumerate_methods(env, &cls_name) {
+    // GetMethodID for getDeclaredMethods
+    let class_cls_name = c"java/lang/Class";
+    let find_cls: unsafe extern "C" fn(JniEnv, *const i8) -> *mut std::ffi::c_void = jfn!(env, JNI_FIND_CLASS);
+    let class_cls = find_cls(env, class_cls_name.as_ptr() as *const i8);
+    crate::jsapi::console::output_message(&format!("[lua] _methods: class_cls={:?}", class_cls));
+    if class_cls.is_null() { exc_check_clear(env); ffi::lua_pushnil(L); return 1; }
+
+    let get_mid: unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *const i8, *const i8) -> *mut std::ffi::c_void = jfn!(env, JNI_GET_METHOD_ID);
+    let mid = get_mid(env, class_cls, c"getDeclaredMethods".as_ptr() as *const i8, c"()[Ljava/lang/reflect/Method;".as_ptr() as *const i8);
+    crate::jsapi::console::output_message(&format!("[lua] _methods: getDeclaredMethods mid={:?}", mid));
+    if mid.is_null() { exc_check_clear(env); ffi::lua_pushnil(L); return 1; }
+
+    crate::jsapi::console::output_message("[lua] _methods: calling getDeclaredMethods...");
+    let call_obj: unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, *const std::ffi::c_void) -> *mut std::ffi::c_void = jfn!(env, 36);
+    let methods_arr = call_obj(env, cls, mid, std::ptr::null());
+    crate::jsapi::console::output_message(&format!("[lua] _methods: methods_arr={:?}", methods_arr));
+    if methods_arr.is_null() { exc_check_clear(env); ffi::lua_pushnil(L); return 1; }
+
+    let get_len: unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void) -> i32 = jfn!(env, 171);
+    let len = get_len(env, methods_arr);
+    crate::jsapi::console::output_message(&format!("[lua] _methods: count={}", len));
+
+    // 暂时返回空 table + 方法数
+    ffi::lua_createtable(L, 0, 0);
+    return 1;
+
+    // 测试: 只做 FindClass，不做反射
+    let test_cls = crate::jsapi::java::reflect::find_class_safe(env, &cls_name);
+    crate::jsapi::console::output_message(&format!("[lua] _methods: FindClass result={:?}", test_cls));
+    if !test_cls.is_null() {
+        let del: unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void) = jfn!(env, JNI_DELETE_LOCAL_REF);
+        del(env, test_cls);
+    }
+
+    crate::jsapi::console::output_message("[lua] _methods: calling enumerate_methods_declared_only");
+    let methods = match crate::jsapi::java::reflect::enumerate_methods_declared_only(env, &cls_name) {
         Ok(ms) => ms,
         Err(e) => {
             crate::jsapi::console::output_message(&format!("[lua] _methods({}) error: {}", cls_name, e));

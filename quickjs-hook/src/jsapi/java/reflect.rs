@@ -201,6 +201,10 @@ unsafe impl Sync for ReflectIds {}
 
 pub(super) static REFLECT_IDS: std::sync::OnceLock<ReflectIds> = std::sync::OnceLock::new();
 
+pub(crate) fn is_reflect_ids_ready() -> bool {
+    REFLECT_IDS.get().is_some()
+}
+
 // ClassLoader 动态覆盖：spawn 模式下 jsinit 时 ClassLoader 不可用，
 // Java.ready() gate 触发后通过 update_app_classloader() 设置。
 use std::sync::atomic::AtomicU64;
@@ -1451,6 +1455,14 @@ pub(super) fn java_type_to_jni(type_name: &str) -> String {
 /// Uses getDeclaredMethods() to include private/protected methods.
 /// Falls back to getMethods() for inherited public methods if no match found.
 pub(crate) unsafe fn enumerate_methods(env: JniEnv, class_name: &str) -> Result<Vec<MethodInfo>, String> {
+    enumerate_methods_inner(env, class_name, false)
+}
+
+pub(crate) unsafe fn enumerate_methods_declared_only(env: JniEnv, class_name: &str) -> Result<Vec<MethodInfo>, String> {
+    enumerate_methods_inner(env, class_name, true)
+}
+
+unsafe fn enumerate_methods_inner(env: JniEnv, class_name: &str, declared_only: bool) -> Result<Vec<MethodInfo>, String> {
     use std::ffi::CStr;
     use std::ptr;
 
@@ -1598,9 +1610,8 @@ pub(crate) unsafe fn enumerate_methods(env: JniEnv, class_name: &str) -> Result<
 
     collect_methods(methods_array);
 
-    // Add inherited public methods so object proxies can auto-resolve members like
-    // Activity.getApplicationContext() that come from a superclass/interface.
-    if !get_public_methods_mid.is_null() {
+    // Add inherited public methods (getMethods) — may be slow on complex class hierarchies
+    if !declared_only && !get_public_methods_mid.is_null() {
         let public_methods_array = call_obj(env, cls, get_public_methods_mid, ptr::null());
         if !public_methods_array.is_null() && !jni_check_exc(env) {
             collect_methods(public_methods_array);

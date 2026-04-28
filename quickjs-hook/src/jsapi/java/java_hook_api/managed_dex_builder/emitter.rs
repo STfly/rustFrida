@@ -43,6 +43,9 @@ pub(super) struct DslBuildContext {
     pub(super) counters: Vec<GeneratedCounter>,
     int_expr_scratch_base: u16,
     int_expr_scratch_count: u16,
+    array_literal_scratch_base: u16,
+    array_literal_scratch_count: u16,
+    array_literal_depth: u16,
     invoke_scratch_base: u16,
     invoke_frame_words: u16,
     invoke_frame_count: u16,
@@ -97,6 +100,8 @@ impl DslBuildContext {
         generated_type: String,
         int_expr_scratch_base: u16,
         int_expr_scratch_count: u16,
+        array_literal_scratch_base: u16,
+        array_literal_scratch_count: u16,
         invoke_scratch_base: u16,
         invoke_frame_words: u16,
         invoke_frame_count: u16,
@@ -108,6 +113,9 @@ impl DslBuildContext {
             counters: Vec::new(),
             int_expr_scratch_base,
             int_expr_scratch_count,
+            array_literal_scratch_base,
+            array_literal_scratch_count,
+            array_literal_depth: 0,
             invoke_scratch_base,
             invoke_frame_words,
             invoke_frame_count,
@@ -145,6 +153,28 @@ impl DslBuildContext {
             ));
         }
         checked_reg(self.int_expr_scratch_base + index, "int expression scratch register")
+    }
+
+    fn enter_array_literal(&mut self) -> Result<u8, String> {
+        if self.array_literal_depth >= self.array_literal_scratch_count {
+            return Err(format!(
+                "array literal nesting depth {} exceeds reserved scratch registers {}",
+                self.array_literal_depth + 1,
+                self.array_literal_scratch_count
+            ));
+        }
+        let reg = checked_reg(
+            self.array_literal_scratch_base
+                .checked_add(self.array_literal_depth)
+                .ok_or_else(|| "too many dex registers".to_string())?,
+            "array literal scratch register",
+        )?;
+        self.array_literal_depth += 1;
+        Ok(reg)
+    }
+
+    fn leave_array_literal(&mut self) {
+        self.array_literal_depth = self.array_literal_depth.saturating_sub(1);
     }
 
     fn enter_invoke_frame(&mut self) -> Result<InvokeScratchFrame, String> {
@@ -1474,17 +1504,43 @@ fn emit_array_literal_value(
     }
     let component_type = array_component_descriptor(&array_type)?;
     let kind = value_kind_from_descriptor(&component_type)?;
-    let array_reg = REG_LOOP_LIMIT;
+    let array_reg = dsl_ctx.enter_array_literal()?;
+    let result = emit_array_literal_value_in_reg(
+        ir,
+        elements,
+        &array_type,
+        &component_type,
+        kind,
+        array_reg,
+        dst,
+        layout,
+        dsl_ctx,
+    );
+    dsl_ctx.leave_array_literal();
+    result
+}
+
+fn emit_array_literal_value_in_reg(
+    ir: &mut DexIrBuilder,
+    elements: &[DslValue],
+    array_type: &str,
+    component_type: &str,
+    kind: ValueKind,
+    array_reg: u8,
+    dst: u8,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<u8, String> {
     let len = i16::try_from(elements.len()).map_err(|_| "array literal is too large".to_string())?;
     if (0..=7).contains(&len) {
         ir.const4(REG_TMP0, len as i8);
     } else {
         ir.const16(REG_TMP0, len);
     }
-    ir.new_array(array_reg, REG_TMP0, array_type.clone());
+    ir.new_array(array_reg, REG_TMP0, array_type.to_string());
 
     for (index, element) in elements.iter().enumerate() {
-        let value_reg = emit_array_literal_element(ir, element, &component_type, kind, array_reg, layout, dsl_ctx)?;
+        let value_reg = emit_array_literal_element(ir, element, component_type, kind, array_reg, layout, dsl_ctx)?;
         let index = i16::try_from(index).map_err(|_| "array literal is too large".to_string())?;
         if (0..=7).contains(&index) {
             ir.const4(REG_TMP0, index as i8);
@@ -1509,10 +1565,6 @@ fn emit_array_literal_element(
     layout: &HelperParamLayout,
     dsl_ctx: &mut DslBuildContext,
 ) -> Result<u8, String> {
-    if matches!(element, DslValue::ArrayLiteral { .. }) {
-        return Err("nested array literals are not supported yet; create the inner array explicitly".to_string());
-    }
-
     match element {
         DslValue::String(value) => {
             if !return_is_object(component_type) {
@@ -2699,6 +2751,10 @@ pub(super) fn program_int_expr_scratch_count(program: &DslProgram) -> u16 {
     statements_int_expr_scratch_count(&program.stmts)
 }
 
+pub(super) fn program_array_literal_scratch_count(program: &DslProgram) -> u16 {
+    statements_array_literal_scratch_count(&program.stmts)
+}
+
 fn statements_max_invoke_depth(stmts: &[DslStmt]) -> u16 {
     stmts.iter().map(stmt_max_invoke_depth).max().unwrap_or(0)
 }
@@ -3038,6 +3094,181 @@ fn condition_int_expr_scratch_count(condition: &DslCondition) -> u16 {
             condition_int_expr_scratch_count(left).max(condition_int_expr_scratch_count(right))
         }
         DslCondition::Not(condition) => condition_int_expr_scratch_count(condition),
+    }
+}
+
+fn statements_array_literal_scratch_count(stmts: &[DslStmt]) -> u16 {
+    stmts.iter().map(stmt_array_literal_scratch_count).max().unwrap_or(0)
+}
+
+fn stmt_array_literal_scratch_count(stmt: &DslStmt) -> u16 {
+    match stmt {
+        DslStmt::Block(stmts) => statements_array_literal_scratch_count(stmts),
+        DslStmt::Let { value, .. }
+        | DslStmt::Assign { value, .. }
+        | DslStmt::NewArray { size: value, .. }
+        | DslStmt::Cast { value, .. }
+        | DslStmt::ArrayLength { array: value }
+        | DslStmt::Throw { value } => value_array_literal_scratch_count(value),
+        DslStmt::LetOrig { args, .. } | DslStmt::ReturnOrig { args } => orig_args_array_literal_scratch_count(args),
+        DslStmt::New { args, .. } => values_array_literal_scratch_count(args),
+        DslStmt::Call(stmt) => call_stmt_array_literal_scratch_count(stmt),
+        DslStmt::ArrayGet { array, index, .. } => {
+            value_array_literal_scratch_count(array).max(value_array_literal_scratch_count(index))
+        }
+        DslStmt::ArrayPut {
+            array, index, value, ..
+        }
+        | DslStmt::ArrayUpdate {
+            array, index, value, ..
+        } => value_array_literal_scratch_count(array)
+            .max(value_array_literal_scratch_count(index))
+            .max(value_array_literal_scratch_count(value)),
+        DslStmt::FieldRead { stmt, .. } | DslStmt::FieldWrite { stmt, .. } => {
+            field_stmt_array_literal_scratch_count(stmt)
+        }
+        DslStmt::FieldUpdate { stmt, value, .. } => {
+            field_stmt_array_literal_scratch_count(stmt).max(value_array_literal_scratch_count(value))
+        }
+        DslStmt::IfNull {
+            value,
+            then_stmts,
+            else_stmts,
+            ..
+        }
+        | DslStmt::IfBool {
+            value,
+            then_stmts,
+            else_stmts,
+        }
+        | DslStmt::IfInstanceOf {
+            value,
+            then_stmts,
+            else_stmts,
+            ..
+        } => value_array_literal_scratch_count(value)
+            .max(statements_array_literal_scratch_count(then_stmts))
+            .max(statements_array_literal_scratch_count(else_stmts)),
+        DslStmt::IfCmp {
+            left,
+            right,
+            then_stmts,
+            else_stmts,
+            ..
+        } => value_array_literal_scratch_count(left)
+            .max(value_array_literal_scratch_count(right))
+            .max(statements_array_literal_scratch_count(then_stmts))
+            .max(statements_array_literal_scratch_count(else_stmts)),
+        DslStmt::Switch {
+            value,
+            cases,
+            default_stmts,
+        } => {
+            let mut count = value_array_literal_scratch_count(value);
+            for (_, stmts) in cases {
+                count = count.max(statements_array_literal_scratch_count(stmts));
+            }
+            if let Some(stmts) = default_stmts {
+                count = count.max(statements_array_literal_scratch_count(stmts));
+            }
+            count
+        }
+        DslStmt::TryCatch { try_stmts, catches } => {
+            let mut count = statements_array_literal_scratch_count(try_stmts);
+            for catch in catches {
+                count = count.max(statements_array_literal_scratch_count(&catch.catch_stmts));
+            }
+            count
+        }
+        DslStmt::While { condition, body_stmts } | DslStmt::DoWhile { condition, body_stmts } => {
+            condition_array_literal_scratch_count(condition).max(statements_array_literal_scratch_count(body_stmts))
+        }
+        DslStmt::For {
+            init_stmts,
+            condition,
+            update_stmts,
+            body_stmts,
+        } => statements_array_literal_scratch_count(init_stmts)
+            .max(
+                condition
+                    .as_ref()
+                    .map(condition_array_literal_scratch_count)
+                    .unwrap_or(0),
+            )
+            .max(statements_array_literal_scratch_count(update_stmts))
+            .max(statements_array_literal_scratch_count(body_stmts)),
+        DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => 0,
+        DslStmt::ReturnValue { value } => value.as_ref().map(value_array_literal_scratch_count).unwrap_or(0),
+    }
+}
+
+fn field_stmt_array_literal_scratch_count(stmt: &DslFieldStmt) -> u16 {
+    stmt.receiver
+        .as_deref()
+        .map(value_array_literal_scratch_count)
+        .unwrap_or(0)
+        .max(stmt.value.as_ref().map(value_array_literal_scratch_count).unwrap_or(0))
+}
+
+fn call_stmt_array_literal_scratch_count(stmt: &DslCallStmt) -> u16 {
+    stmt.receiver
+        .as_deref()
+        .map(value_array_literal_scratch_count)
+        .unwrap_or(0)
+        .max(values_array_literal_scratch_count(&stmt.args))
+}
+
+fn orig_args_array_literal_scratch_count(args: &DslOrigArgs) -> u16 {
+    match args {
+        DslOrigArgs::Original => 0,
+        DslOrigArgs::Values(values) => values_array_literal_scratch_count(values),
+    }
+}
+
+fn values_array_literal_scratch_count(values: &[DslValue]) -> u16 {
+    values.iter().map(value_array_literal_scratch_count).max().unwrap_or(0)
+}
+
+fn value_array_literal_scratch_count(value: &DslValue) -> u16 {
+    match value {
+        DslValue::ArrayLiteral { elements } => 1 + values_array_literal_scratch_count(elements),
+        DslValue::UnaryOp { value, .. } | DslValue::Cast { value, .. } | DslValue::ArrayLength(value) => {
+            value_array_literal_scratch_count(value)
+        }
+        DslValue::IntBinOp { left, right, .. } => {
+            value_array_literal_scratch_count(left).max(value_array_literal_scratch_count(right))
+        }
+        DslValue::Ternary {
+            condition,
+            then_value,
+            else_value,
+        } => condition_array_literal_scratch_count(condition)
+            .max(value_array_literal_scratch_count(then_value))
+            .max(value_array_literal_scratch_count(else_value)),
+        DslValue::OrigCall(args) => orig_args_array_literal_scratch_count(args),
+        DslValue::Call(stmt) => call_stmt_array_literal_scratch_count(stmt),
+        DslValue::NewObject { args, .. } => values_array_literal_scratch_count(args),
+        DslValue::FieldGet { stmt, .. } => field_stmt_array_literal_scratch_count(stmt),
+        DslValue::ArrayGet { array, index, .. } => {
+            value_array_literal_scratch_count(array).max(value_array_literal_scratch_count(index))
+        }
+        DslValue::Target(_) | DslValue::String(_) | DslValue::Int(_) | DslValue::Bool(_) | DslValue::Null => 0,
+    }
+}
+
+fn condition_array_literal_scratch_count(condition: &DslCondition) -> u16 {
+    match condition {
+        DslCondition::Const(_) => 0,
+        DslCondition::Null { value, .. } | DslCondition::Bool { value } | DslCondition::InstanceOf { value, .. } => {
+            value_array_literal_scratch_count(value)
+        }
+        DslCondition::Cmp { left, right, .. } => {
+            value_array_literal_scratch_count(left).max(value_array_literal_scratch_count(right))
+        }
+        DslCondition::And(left, right) | DslCondition::Or(left, right) => {
+            condition_array_literal_scratch_count(left).max(condition_array_literal_scratch_count(right))
+        }
+        DslCondition::Not(condition) => condition_array_literal_scratch_count(condition),
     }
 }
 

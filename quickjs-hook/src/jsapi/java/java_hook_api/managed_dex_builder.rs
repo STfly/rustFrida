@@ -362,8 +362,8 @@ fn format_inferred_arg_types(arg_types: &[Option<String>]) -> String {
 mod emitter;
 use emitter::{
     collect_local_slots, emit_statements, helper_param_layout, precollect_string_literals,
-    program_int_expr_scratch_count, program_max_invoke_depth, program_max_invoke_words, program_uses_orig,
-    DslBuildContext, EmitContext, BASE_LOCAL_REG_COUNT,
+    program_array_literal_scratch_count, program_int_expr_scratch_count, program_max_invoke_depth,
+    program_max_invoke_words, program_uses_orig, DslBuildContext, EmitContext, BASE_LOCAL_REG_COUNT,
 };
 
 pub(super) unsafe fn build_managed_dsl_dex(
@@ -404,8 +404,12 @@ pub(super) unsafe fn build_managed_dsl_dex(
     }
     let max_invoke_depth = program_max_invoke_depth(&program).max(1);
     let int_expr_scratch_count = program_int_expr_scratch_count(&program);
-    let invoke_scratch_base = BASE_LOCAL_REG_COUNT
+    let array_literal_scratch_base = BASE_LOCAL_REG_COUNT
         .checked_add(int_expr_scratch_count)
+        .ok_or_else(|| "too many dex registers".to_string())?;
+    let array_literal_scratch_count = program_array_literal_scratch_count(&program);
+    let invoke_scratch_base = array_literal_scratch_base
+        .checked_add(array_literal_scratch_count)
         .ok_or_else(|| "too many dex registers".to_string())?;
     let invoke_frame_words = max_invoke_words.max(1);
     let invoke_frame_span = invoke_frame_words
@@ -440,6 +444,8 @@ pub(super) unsafe fn build_managed_dsl_dex(
         generated_type.clone(),
         BASE_LOCAL_REG_COUNT,
         int_expr_scratch_count,
+        array_literal_scratch_base,
+        array_literal_scratch_count,
         invoke_scratch_base,
         invoke_frame_words,
         max_invoke_depth,

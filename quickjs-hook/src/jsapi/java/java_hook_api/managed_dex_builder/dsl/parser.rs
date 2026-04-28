@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use super::lexer::{lex as dsl_lex, Token as DslToken};
 
+#[derive(Clone, Copy)]
+pub(super) struct DslMark(pub(super) usize);
+
 pub(super) struct DslParser<'a> {
     pub(super) input: &'a str,
     pub(super) tokens: Vec<DslToken>,

@@ -3,12 +3,12 @@ use super::*;
 impl<'a> DslParser<'a> {
     pub(super) fn skip_ws(&mut self) {}
 
-    pub(super) fn mark(&self) -> usize {
-        self.pos
+    pub(super) fn mark(&self) -> DslMark {
+        DslMark(self.pos)
     }
 
-    pub(super) fn restore(&mut self, mark: usize) {
-        self.pos = mark;
+    pub(super) fn restore(&mut self, mark: DslMark) {
+        self.pos = mark.0;
     }
 
     pub(super) fn rewind_one(&mut self) {
@@ -16,9 +16,9 @@ impl<'a> DslParser<'a> {
     }
 
     pub(super) fn expect_ident(&mut self, expected: &str) -> Result<(), String> {
-        match self.tokens.get(self.pos).map(|token| &token.kind) {
+        match self.current_kind() {
             Some(DslTokenKind::Ident(value)) if value == expected => {
-                self.pos += 1;
+                self.advance();
                 Ok(())
             }
             _ => Err(self.err(&format!("expected identifier {}", expected))),
@@ -26,14 +26,15 @@ impl<'a> DslParser<'a> {
     }
 
     pub(super) fn peek_ident(&self, expected: &str) -> bool {
-        matches!(self.tokens.get(self.pos).map(|token| &token.kind), Some(DslTokenKind::Ident(value)) if value == expected)
+        matches!(self.current_kind(), Some(DslTokenKind::Ident(value)) if value == expected)
     }
 
     pub(super) fn parse_ident(&mut self) -> Result<String, String> {
-        match self.tokens.get(self.pos).map(|token| &token.kind) {
+        match self.current_kind() {
             Some(DslTokenKind::Ident(value)) => {
-                self.pos += 1;
-                Ok(value.clone())
+                let value = value.clone();
+                self.advance();
+                Ok(value)
             }
             _ => Err(self.err("expected identifier")),
         }
@@ -42,7 +43,7 @@ impl<'a> DslParser<'a> {
     pub(super) fn expect_char(&mut self, expected: char) -> Result<(), String> {
         match self.peek() {
             Some(ch) if ch == expected => {
-                self.pos += 1;
+                self.advance();
                 Ok(())
             }
             _ => Err(self.err(&format!("expected '{}'", expected))),
@@ -57,20 +58,22 @@ impl<'a> DslParser<'a> {
     }
 
     pub(super) fn parse_string(&mut self) -> Result<String, String> {
-        match self.tokens.get(self.pos).map(|token| &token.kind) {
+        match self.current_kind() {
             Some(DslTokenKind::String(value)) => {
-                self.pos += 1;
-                Ok(value.clone())
+                let value = value.clone();
+                self.advance();
+                Ok(value)
             }
             _ => Err(self.err("expected string")),
         }
     }
 
     pub(super) fn parse_number_text(&mut self) -> Result<String, String> {
-        match self.tokens.get(self.pos).map(|token| &token.kind) {
+        match self.current_kind() {
             Some(DslTokenKind::Number(value)) => {
-                self.pos += 1;
-                Ok(value.clone())
+                let value = value.clone();
+                self.advance();
+                Ok(value)
             }
             _ => Err(self.err("expected integer")),
         }
@@ -85,33 +88,27 @@ impl<'a> DslParser<'a> {
     }
 
     pub(super) fn peek(&self) -> Option<char> {
-        match self.tokens.get(self.pos).map(|token| &token.kind) {
+        match self.current_kind() {
             Some(DslTokenKind::Symbol(ch)) => Some(*ch),
             _ => None,
         }
     }
 
     pub(super) fn peek_string(&self) -> bool {
-        matches!(
-            self.tokens.get(self.pos).map(|token| &token.kind),
-            Some(DslTokenKind::String(_))
-        )
+        matches!(self.current_kind(), Some(DslTokenKind::String(_)))
     }
 
     pub(super) fn peek_number(&self) -> bool {
-        matches!(
-            self.tokens.get(self.pos).map(|token| &token.kind),
-            Some(DslTokenKind::Number(_))
-        )
+        matches!(self.current_kind(), Some(DslTokenKind::Number(_)))
     }
 
     pub(super) fn peek_op(&self, expected: &str) -> bool {
-        matches!(self.tokens.get(self.pos).map(|token| &token.kind), Some(DslTokenKind::Op(value)) if *value == expected)
+        matches!(self.current_kind(), Some(DslTokenKind::Op(value)) if *value == expected)
     }
 
     pub(super) fn expect_op(&mut self, expected: &str) -> Result<(), String> {
         if self.peek_op(expected) {
-            self.pos += 1;
+            self.advance();
             Ok(())
         } else {
             Err(self.err(&format!("expected operator {}", expected)))
@@ -129,5 +126,13 @@ impl<'a> DslParser<'a> {
             .map(|token| token.byte)
             .unwrap_or_else(|| self.input.len());
         format!("managed dex DSL parse error at byte {}: {}", byte, msg)
+    }
+
+    fn current_kind(&self) -> Option<&DslTokenKind> {
+        self.tokens.get(self.pos).map(|token| &token.kind)
+    }
+
+    fn advance(&mut self) {
+        self.pos += 1;
     }
 }

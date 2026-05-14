@@ -14,30 +14,6 @@ use crate::logger::{GRAY, GREEN, HIGHLIGHT_BG, HIGHLIGHT_FG, RED, RESET, YELLOW}
 use crate::session::Session;
 use crate::{log_error, log_info, log_warn};
 
-/// 构造一个带可选 filename 前缀的 `loadjs` 命令字符串。
-///
-/// 当 `script_path` 非空时会提取 basename 作为 QuickJS 的 source filename，
-/// 错误信息会显示 `script.js:line:col` 而不是 `<eval>:line:col`。
-///
-/// 脚本本身保留原始换行，不做任何 `\n → \r` 替换（wire 协议是长度前缀的二进制帧，
-/// 支持任意字节）。
-fn build_loadjs_like_cmd(command: &str, script: &str, script_path: Option<&str>) -> String {
-    if let Some(path) = script_path {
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("script.js");
-        // filename 内含 `[` / `]` / `\n` 会破坏解析，fallback 到 <eval>
-        if name.contains('[') || name.contains(']') || name.contains('\n') {
-            format!("{} {}", command, script)
-        } else {
-            format!("{} [{}]\n{}", command, name, script)
-        }
-    } else {
-        format!("{} {}", command, script)
-    }
-}
-
 fn script_filename(script_path: &str) -> String {
     std::path::Path::new(script_path)
         .file_name()
@@ -46,24 +22,149 @@ fn script_filename(script_path: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn build_loadjs_cmd(script: &str, script_path: Option<&str>) -> String {
-    build_loadjs_like_cmd("loadjs", script, script_path)
+fn parse_loadjs_payload_for_host(payload: &str) -> (&str, &str) {
+    if !payload.starts_with('[') {
+        return ("", payload);
+    }
+    let first_line_end = payload.find('\n').unwrap_or(payload.len());
+    let first_line = &payload[..first_line_end];
+    if !first_line.ends_with(']') {
+        return ("", payload);
+    }
+    let filename = &first_line[1..first_line.len() - 1];
+    if filename.is_empty() || filename.contains('[') || filename.contains(']') {
+        return ("", payload);
+    }
+    let script_start = if first_line_end < payload.len() {
+        first_line_end + 1
+    } else {
+        payload.len()
+    };
+    (filename, &payload[script_start..])
 }
 
-pub(crate) fn build_loadjs_init_cmd(script: &str, script_path: Option<&str>) -> String {
-    build_loadjs_like_cmd("loadjs_init", script, script_path)
+pub(crate) fn try_loadjs_on_main_thread_if_java(session: &Session, line: &str) -> Result<bool, String> {
+    let Some(rest) = line
+        .strip_prefix("loadjs ")
+        .or_else(|| line.strip_prefix("loadjs\n"))
+        .or_else(|| line.strip_prefix("loadjs"))
+    else {
+        return Ok(false);
+    };
+    let (filename, script) = parse_loadjs_payload_for_host(rest);
+
+    if script_uses_java_api(script) {
+        log_info!("检测到 Java loadjs，切到目标主线程执行");
+    } else {
+        log_info!("loadjs 切到目标主线程执行");
+    }
+    crate::remote_agent::eval_js_on_main_thread(session, script, filename, true)
+        .map_err(|e| format!("主线程执行 loadjs 失败: {}", e))?;
+    Ok(true)
 }
 
 pub(crate) enum PreResumeLoad {
     Loaded,
 }
 
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b == b'$' || b.is_ascii_alphanumeric()
+}
+
+fn skip_ws_and_comments(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            _ => break,
+        }
+    }
+    i
+}
+
+fn skip_js_quoted(bytes: &[u8], mut i: usize, quote: u8) -> usize {
+    i += 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+        } else if bytes[i] == quote {
+            return i + 1;
+        } else {
+            i += 1;
+        }
+    }
+    i
+}
+
+fn java_member_accesses(script: &str) -> Vec<(usize, String)> {
+    let bytes = script.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_js_quoted(bytes, i, bytes[i]);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+            }
+            b'J' if bytes.get(i..i + 4) == Some(b"Java")
+                && (i == 0 || !is_ident_byte(bytes[i - 1]))
+                && (i + 4 >= bytes.len() || !is_ident_byte(bytes[i + 4])) =>
+            {
+                let dot = skip_ws_and_comments(bytes, i + 4);
+                if dot < bytes.len() && bytes[dot] == b'.' {
+                    let start = skip_ws_and_comments(bytes, dot + 1);
+                    let mut end = start;
+                    while end < bytes.len() && is_ident_byte(bytes[end]) {
+                        end += 1;
+                    }
+                    if end > start {
+                        if let Ok(member) = std::str::from_utf8(&bytes[start..end]) {
+                            out.push((i, member.to_string()));
+                        }
+                    }
+                }
+                i += 4;
+            }
+            _ => i += 1,
+        }
+    }
+
+    out
+}
+
 pub(crate) fn script_uses_java_api(script: &str) -> bool {
-    script.contains("Java.")
+    !java_member_accesses(script).is_empty()
 }
 
 pub(crate) fn detect_java_stealth_mode(script: &str) -> Option<i32> {
-    let idx = script.find("Java.setStealth")?;
+    let idx = java_member_accesses(script)
+        .into_iter()
+        .find_map(|(idx, member)| (member == "setStealth").then_some(idx))?;
     let rest = &script[idx..];
     let open = rest.find('(')?;
     let rest = &rest[open + 1..];
@@ -345,43 +446,14 @@ fn load_script_file_with_mode(
 
     if script_uses_java_api(&script) {
         log_info!("检测到 Java 脚本，切到目标主线程执行");
-        let filename = script_filename(script_path);
-        session.eval_state.clear();
-        crate::remote_agent::eval_js_on_main_thread(session, &script, &filename, true)
-            .map_err(|e| format!("主线程加载 Java 脚本失败: {}", e))?;
-        print_eval_result(session, if stop_worker_after_load { 10 } else { 30 });
-        return Ok(PreResumeLoad::Loaded);
+    } else {
+        log_info!("脚本切到目标主线程执行");
     }
-
+    let filename = script_filename(script_path);
     session.eval_state.clear();
-    let cmd = if stop_worker_after_load {
-        build_loadjs_init_cmd(&script, Some(script_path))
-    } else {
-        send_command(sender, "jsinit").map_err(|e| format!("发送 jsinit 失败: {}", e))?;
-        match session.eval_state.recv_timeout(std::time::Duration::from_secs(10)) {
-            None => return Err("等待引擎初始化超时".to_string()),
-            Some(Err(ref e)) if e.contains("已初始化") => {}
-            Some(Err(e)) => return Err(format!("引擎初始化失败: {}", e)),
-            Some(Ok(_)) => {}
-        }
-
-        session.eval_state.clear();
-        build_loadjs_cmd(&script, Some(script_path))
-    };
-    send_command(sender, cmd).map_err(|e| format!("发送 loadjs 失败: {}", e))?;
-    if stop_worker_after_load {
-        match session.eval_state.recv_timeout(std::time::Duration::from_secs(1)) {
-            None => log_info!("脚本预加载仍在执行，先恢复子进程"),
-            Some(Err(e)) => return Err(format!("脚本执行失败: {}", e)),
-            Some(Ok(out)) => {
-                if !out.is_empty() {
-                    log_info!("=> {}", out);
-                }
-            }
-        }
-    } else {
-        print_eval_result(session, 30);
-    }
+    crate::remote_agent::eval_js_on_main_thread(session, &script, &filename, true)
+        .map_err(|e| format!("主线程加载脚本失败: {}", e))?;
+    print_eval_result(session, if stop_worker_after_load { 10 } else { 30 });
     Ok(PreResumeLoad::Loaded)
 }
 
@@ -526,9 +598,18 @@ pub(crate) fn run_js_repl(session: &Arc<Session>) {
                 // 发送前清空 eval 状态
                 session.eval_state.clear();
                 let cmd = format!("loadjs {}", line);
-                if let Err(e) = send_command(sender, cmd) {
-                    log_error!("发送 JS 命令失败: {}", e);
-                    break;
+                match try_loadjs_on_main_thread_if_java(session, &cmd) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Err(e) = send_command(sender, cmd) {
+                            log_error!("发送 JS 命令失败: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log_error!("{}", e);
+                        continue;
+                    }
                 }
                 // 同步等待 agent 返回结果（最长 5 秒）
                 print_eval_result(session, 5);

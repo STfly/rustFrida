@@ -36,8 +36,8 @@ use communication::{send_command, start_socketpair_handler};
 use injection::{inject_via_bootstrapper, watch_and_inject, InjectionResult};
 use process::find_pid_by_name;
 use repl::{
-    load_script_file, load_script_file_pre_resume, print_eval_result, print_help, run_js_repl, CommandCompleter,
-    PreResumeLoad,
+    load_script_file, load_script_file_pre_resume, print_eval_result, print_help, run_js_repl,
+    try_loadjs_on_main_thread_if_java, CommandCompleter, PreResumeLoad,
 };
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -433,11 +433,20 @@ fn main() {
                 if is_eval_cmd {
                     session.eval_state.clear();
                 }
-                match send_command(sender, &line) {
-                    Ok(_) => {}
+                let handled_by_main_thread = match try_loadjs_on_main_thread_if_java(&session, &line) {
+                    Ok(v) => v,
                     Err(e) => {
-                        log_error!("发送命令失败: {}", e);
-                        break;
+                        log_error!("{}", e);
+                        continue;
+                    }
+                };
+                if !handled_by_main_thread {
+                    match send_command(sender, &line) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log_error!("发送命令失败: {}", e);
+                            break;
+                        }
                     }
                 }
                 if is_eval_cmd {

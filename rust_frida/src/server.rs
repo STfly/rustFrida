@@ -22,8 +22,8 @@ use crate::communication::{send_command, start_socketpair_handler};
 use crate::injection::inject_via_bootstrapper;
 use crate::process::find_pid_by_name;
 use crate::repl::{
-    build_loadjs_init_cmd, preconfigure_java_stealth_if_declared, print_eval_result, print_help, run_js_repl,
-    script_uses_java_api,
+    preconfigure_java_stealth_if_declared, print_eval_result, print_help, run_js_repl, script_uses_java_api,
+    try_loadjs_on_main_thread_if_java,
 };
 use crate::session::{Session, SessionManager};
 use crate::spawn;
@@ -130,13 +130,10 @@ fn parse_script_flag(parts: &[&str]) -> (Vec<String>, Option<String>) {
 
 /// 在目标进程暂停期间加载脚本（用于 spawn 模式）
 fn load_script_on_session(session: &Session, script_path: &str, stop_worker_after_load: bool) -> bool {
-    let sender = match session.get_sender() {
-        Some(s) => s,
-        None => {
-            log_error!("[#{}] agent 未连接，无法加载脚本", session.id);
-            return false;
-        }
-    };
+    if session.get_sender().is_none() {
+        log_error!("[#{}] agent 未连接，无法加载脚本", session.id);
+        return false;
+    }
     let script = match std::fs::read_to_string(script_path) {
         Ok(s) => s,
         Err(e) => {
@@ -157,75 +154,32 @@ fn load_script_on_session(session: &Session, script_path: &str, stop_worker_afte
 
     if script_uses_java_api(&script) {
         log_info!("[#{}] 检测到 Java 脚本，切到目标主线程执行", session.id);
-        let filename = std::path::Path::new(script_path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("script.js")
-            .to_string();
-        session.eval_state.clear();
-        match crate::remote_agent::eval_js_on_main_thread(session, &script, &filename, true) {
-            Ok(()) => match session
-                .eval_state
-                .recv_timeout(std::time::Duration::from_secs(if stop_worker_after_load {
-                    10
-                } else {
-                    30
-                })) {
-                None => log_warn!("[#{}] 脚本加载超时", session.id),
-                Some(Err(e)) => log_error!("[#{}] 脚本执行失败: {}", session.id, e),
-                Some(Ok(out)) => {
-                    if !out.is_empty() {
-                        log_success!("[#{}] => {}", session.id, out);
-                    }
-                }
-            },
-            Err(e) => log_error!("[#{}] 主线程加载 Java 脚本失败: {}", session.id, e),
-        }
-        return false;
-    }
-
-    session.eval_state.clear();
-    let cmd = if stop_worker_after_load {
-        build_loadjs_init_cmd(&script, Some(script_path))
     } else {
-        if let Err(e) = send_command(sender, "jsinit") {
-            log_error!("[#{}] 发送 jsinit 失败: {}", session.id, e);
-            return false;
-        }
-        match session.eval_state.recv_timeout(std::time::Duration::from_secs(10)) {
-            None => {
-                log_warn!("[#{}] 等待引擎初始化超时", session.id);
-                return false;
-            }
-            Some(Err(e)) => {
-                log_error!("[#{}] 引擎初始化失败: {}", session.id, e);
-                return false;
-            }
-            Some(Ok(_)) => {}
-        }
-
-        session.eval_state.clear();
-        crate::repl::build_loadjs_cmd(&script, Some(script_path))
-    };
-    if let Err(e) = send_command(sender, cmd) {
-        log_error!("[#{}] 发送 loadjs 失败: {}", session.id, e);
-        return false;
+        log_info!("[#{}] 脚本切到目标主线程执行", session.id);
     }
-    match session
-        .eval_state
-        .recv_timeout(std::time::Duration::from_secs(if stop_worker_after_load {
-            1
-        } else {
-            30
-        })) {
-        None if stop_worker_after_load => log_info!("[#{}] 脚本预加载仍在执行，先恢复子进程", session.id),
-        None => log_warn!("[#{}] 脚本加载超时", session.id),
-        Some(Err(e)) => log_error!("[#{}] 脚本执行失败: {}", session.id, e),
-        Some(Ok(out)) => {
-            if !out.is_empty() {
-                log_success!("[#{}] => {}", session.id, out);
+    session.eval_state.clear();
+    let filename = std::path::Path::new(script_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("script.js")
+        .to_string();
+    match crate::remote_agent::eval_js_on_main_thread(session, &script, &filename, true) {
+        Ok(()) => match session
+            .eval_state
+            .recv_timeout(std::time::Duration::from_secs(if stop_worker_after_load {
+                10
+            } else {
+                30
+            })) {
+            None => log_warn!("[#{}] 脚本加载超时", session.id),
+            Some(Err(e)) => log_error!("[#{}] 脚本执行失败: {}", session.id, e),
+            Some(Ok(out)) => {
+                if !out.is_empty() {
+                    log_success!("[#{}] => {}", session.id, out);
+                }
             }
-        }
+        },
+        Err(e) => log_error!("[#{}] 主线程加载脚本失败: {}", session.id, e),
     }
     false
 }
@@ -456,12 +410,21 @@ fn run_session_repl(session: &Arc<Session>) -> bool {
                         break;
                     }
                 };
-                match send_command(sender, &line) {
-                    Ok(_) => {}
+                let handled_by_main_thread = match try_loadjs_on_main_thread_if_java(session, &line) {
+                    Ok(v) => v,
                     Err(e) => {
-                        log_error!("发送命令失败: {}", e);
-                        should_remove = true;
-                        break;
+                        log_error!("{}", e);
+                        continue;
+                    }
+                };
+                if !handled_by_main_thread {
+                    match send_command(sender, &line) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log_error!("发送命令失败: {}", e);
+                            should_remove = true;
+                            break;
+                        }
                     }
                 }
 

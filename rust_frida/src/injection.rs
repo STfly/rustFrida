@@ -7,6 +7,10 @@ use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
 use std::mem::size_of;
 use std::os::unix::io::RawFd;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use crate::proc_mem::ProcMem;
@@ -30,7 +34,7 @@ pub(crate) const QBDI_HELPER_SO: &[u8] = include_bytes!(env!("QBDI_HELPER_SO_PAT
 const SYS_PIDFD_OPEN: i64 = 434;
 const SYS_PIDFD_GETFD: i64 = 438;
 const PAGE_SIZE: u64 = 4096;
-const LOADER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const LOADER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const LOADER_IO_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn align_down(value: u64, alignment: u64) -> u64 {
@@ -334,6 +338,7 @@ fn find_executable_region(pid: i32, min_size: usize) -> Result<usize, String> {
 }
 
 pub(crate) fn choose_injection_thread(pid: i32) -> i32 {
+    crate::process::thaw_cgroup_freezer(pid);
     let mut fallback = pid;
     for _ in 0..20 {
         let (tid, score) = choose_injection_thread_once(pid);
@@ -379,7 +384,9 @@ fn choose_injection_thread_once(pid: i32) -> (i32, i32) {
         } else if status.contains("State:\tR") {
             score -= 400;
         }
-        if wchan.trim() == "0" {
+        if wchan.contains("freezer") {
+            score -= 1200;
+        } else if wchan.trim() == "0" {
             score -= 600;
         } else if wchan.contains("epoll") {
             score += 80;
@@ -719,6 +726,90 @@ impl Drop for OwnedFd {
     }
 }
 
+struct CgroupThawGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CgroupThawGuard {
+    fn start(pid: i32) -> Self {
+        crate::process::thaw_cgroup_freezer(pid);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                crate::process::thaw_cgroup_freezer(pid);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for CgroupThawGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_trimmed(path: String) -> String {
+    std::fs::read_to_string(path).unwrap_or_default().trim().to_string()
+}
+
+fn cgroup_freezer_state(pid: i32) -> String {
+    let cgroup_path = format!("/proc/{}/cgroup", pid);
+    let content = match std::fs::read_to_string(&cgroup_path) {
+        Ok(content) => content,
+        Err(e) => return format!("unavailable({})", e),
+    };
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let cgroup_rel = parts[2].trim_start_matches('/');
+        let freeze_path = format!("/sys/fs/cgroup/{}/cgroup.freeze", cgroup_rel);
+        if let Ok(value) = std::fs::read_to_string(&freeze_path) {
+            return format!("{}={}", freeze_path, value.trim());
+        }
+    }
+
+    "none".to_string()
+}
+
+fn loader_thread_diagnostics(pid: i32, tid: i32) -> String {
+    let status = std::fs::read_to_string(format!("/proc/{}/task/{}/status", pid, tid)).unwrap_or_default();
+    let state = status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let tracer = status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let comm = read_trimmed(format!("/proc/{}/task/{}/comm", pid, tid));
+    let wchan = read_trimmed(format!("/proc/{}/task/{}/wchan", pid, tid));
+
+    format!(
+        "loader_diag: tid={} comm={} state={} wchan={} tracer={} freezer={}",
+        tid,
+        if comm.is_empty() { "unknown" } else { &comm },
+        state,
+        if wchan.is_empty() { "unknown" } else { &wchan },
+        tracer,
+        cgroup_freezer_state(pid)
+    )
+}
+
 fn loader_timeout_left(deadline: Instant, context: &str) -> Result<Duration, String> {
     deadline
         .checked_duration_since(Instant::now())
@@ -870,6 +961,7 @@ fn run_loader_handshake(
     libc_munmap: u64,
 ) -> Result<InjectionResult, String> {
     let deadline = Instant::now() + LOADER_HANDSHAKE_TIMEOUT;
+    let _thaw_guard = CgroupThawGuard::start(target_pid);
 
     // 1. 接收 HELLO 消息: [type:u8][thread_id:i32]
     let mut msg_type = [0u8; 1];
@@ -931,7 +1023,12 @@ fn run_loader_handshake(
 
     // 4. 等待 READY（或错误）— loader 在自定义 linker + entrypoint 查找 + recv agent_ctrlfd 之后才发送
     loop {
-        recv_exact_timeout(ctrl_fd, &mut msg_type, deadline, "等待 loader READY")?;
+        match recv_exact_timeout(ctrl_fd, &mut msg_type, deadline, "等待 loader READY") {
+            Ok(()) => {}
+            Err(e) => {
+                return Err(format!("{}; {}", e, loader_thread_diagnostics(target_pid, thread_id)));
+            }
+        }
         match msg_type[0] {
             t if t == message_type::READY => {
                 log_success!("Loader: agent 加载成功");

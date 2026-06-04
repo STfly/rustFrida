@@ -253,13 +253,21 @@ void hook_engine_cleanup(void) {
         } else if (entry->stealth == 2) {
             /* Recomp entries are discarded below with the pool. */
         } else {
-            uintptr_t page_start = (uintptr_t)entry->target & ~0xFFF;
-            int first_prot = page_prot_flags(page_start);
-            int second_prot = page_prot_flags(page_start + 0x1000);
-            mprotect((void*)page_start, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
-            memcpy(entry->target, entry->original_bytes, entry->original_size);
-            restore_page_prot_span(page_start, first_prot, second_prot);
-            hook_flush_cache(entry->target, entry->original_size);
+            int saved_prot[8] = {0};
+            size_t saved_count = save_range_prot_pages(entry->target, entry->original_size,
+                                                       saved_prot,
+                                                       sizeof(saved_prot) / sizeof(saved_prot[0]));
+            if (saved_count != 0 &&
+                    saved_count <= sizeof(saved_prot) / sizeof(saved_prot[0]) &&
+                    mprotect_range_pages(entry->target, entry->original_size,
+                                         PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+                memcpy(entry->target, entry->original_bytes, entry->original_size);
+                restore_range_prot_pages(entry->target, entry->original_size, saved_prot, saved_count);
+                hook_flush_cache(entry->target, entry->original_size);
+            } else {
+                hook_log("hook_engine_cleanup: mprotect restore failed for %p errno=%d",
+                         entry->target, errno);
+            }
         }
         entry = entry->next;
     }

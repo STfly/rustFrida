@@ -58,6 +58,79 @@ int page_prot_flags(uintptr_t addr) {
     return prot;
 }
 
+static size_t hook_page_size(void) {
+    long page_size = sysconf(_SC_PAGESIZE);
+    return page_size > 0 ? (size_t)page_size : 4096u;
+}
+
+static uintptr_t hook_page_start(uintptr_t addr) {
+    size_t page_size = hook_page_size();
+    return addr & ~(uintptr_t)(page_size - 1);
+}
+
+int mprotect_range_pages(void* target, size_t len, int prot) {
+    if (!target || len == 0) return -1;
+
+    size_t page_size = hook_page_size();
+    uintptr_t start = (uintptr_t)target;
+    uintptr_t end = start + len - 1;
+    if (end < start) return -1;
+
+    uintptr_t page = hook_page_start(start);
+    uintptr_t last_page = hook_page_start(end);
+    for (;;) {
+        if (mprotect((void*)page, page_size, prot) != 0) {
+            return -1;
+        }
+        if (page == last_page) break;
+        page += page_size;
+    }
+    return 0;
+}
+
+void restore_range_prot_pages(void* target, size_t len, const int* prot_flags, size_t prot_count) {
+    if (!target || len == 0 || !prot_flags || prot_count == 0) return;
+
+    size_t page_size = hook_page_size();
+    uintptr_t start = (uintptr_t)target;
+    uintptr_t end = start + len - 1;
+    if (end < start) return;
+
+    uintptr_t page = hook_page_start(start);
+    uintptr_t last_page = hook_page_start(end);
+    size_t i = 0;
+    for (;;) {
+        int prot = i < prot_count ? prot_flags[i] : (PROT_READ | PROT_EXEC);
+        if (prot == 0) prot = PROT_READ | PROT_EXEC;
+        mprotect((void*)page, page_size, prot);
+        if (page == last_page) break;
+        page += page_size;
+        i++;
+    }
+}
+
+size_t save_range_prot_pages(void* target, size_t len, int* prot_flags, size_t prot_cap) {
+    if (!target || len == 0 || !prot_flags || prot_cap == 0) return 0;
+
+    size_t page_size = hook_page_size();
+    uintptr_t start = (uintptr_t)target;
+    uintptr_t end = start + len - 1;
+    if (end < start) return 0;
+
+    uintptr_t page = hook_page_start(start);
+    uintptr_t last_page = hook_page_start(end);
+    size_t count = 0;
+    for (;;) {
+        if (count < prot_cap) {
+            prot_flags[count] = page_prot_flags(page);
+        }
+        count++;
+        if (page == last_page) break;
+        page += page_size;
+    }
+    return count;
+}
+
 /*
  * Safely read bytes from a target address.
  *
@@ -75,8 +148,7 @@ int read_target_safe(void* target, void* buf, size_t len) {
     }
 
     /* Page not readable (XOM / --x) — mprotect to add read, then memcpy */
-    uintptr_t page_start = (uintptr_t)target & ~(uintptr_t)0xFFF;
-    if (mprotect((void*)page_start, 0x2000, PROT_READ | PROT_EXEC) == 0) {
+    if (mprotect_range_pages(target, len, PROT_READ | PROT_EXEC) == 0) {
         memcpy(buf, target, len);
         /* mprotect already set r-x, no need to restore */
         return 0;
@@ -718,7 +790,12 @@ void* hook_mmap_near_range(void* target, size_t alloc_size, int64_t max_range) {
                          ptr, target, (long long)max_range, i, steps);
                 return ptr;
             }
-            if (errno == EEXIST) continue;  /* 隐藏 VMA 或已占用，步进跳过 */
+            if (errno == EEXIST || errno == EACCES || errno == EPERM) {
+                /* 隐藏/残留 VMA 在部分内核上不会稳定返回 EEXIST，
+                 * 可能表现为 EACCES/EPERM。继续按页探测同一 gap，
+                 * 不退回远地址或 mprotect fallback。 */
+                continue;
+            }
             if (errno == ENOSYS || errno == EINVAL) {
                 had_unsupported = 1;
                 break;
@@ -1280,39 +1357,43 @@ int patch_target(void* target, void* jump_dest, int stealth, HookEntry* entry) {
     if (jump_result < 0) {
         return jump_result;
     }
+    int jump_len = jump_result;
 
     {
-        void* writable = find_rw_sibling(target, (size_t)jump_result);
+        void* writable = find_rw_sibling(target, (size_t)jump_len);
         if (writable) {
-            memcpy(writable, jump_buf, (size_t)jump_result);
+            memcpy(writable, jump_buf, (size_t)jump_len);
             /* flush icache 在 target 侧 (CPU 执行地址) — 虚拟地址不同但物理页同 */
-            __builtin___clear_cache((char*)target, (char*)target + jump_result);
-            __builtin___clear_cache((char*)writable, (char*)writable + jump_result);
+            __builtin___clear_cache((char*)target, (char*)target + jump_len);
+            __builtin___clear_cache((char*)writable, (char*)writable + jump_len);
             entry->stealth = 0;
-            entry->original_size = jump_result;
+            entry->original_size = jump_len;
             hook_log("[patch_target] rw-sibling OK target=%p via writable=%p len=%d",
-                     target, writable, jump_result);
+                     target, writable, jump_len);
             return 0;
         }
     }
 
-    /* Fallback: mprotect + direct write */
-    uintptr_t page_start = (uintptr_t)target & ~0xFFF;
-    int first_prot = page_prot_flags(page_start);
-    int second_prot = page_prot_flags(page_start + 0x1000);
-    if (mprotect((void*)page_start, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        hook_log("[patch_target] mprotect(RWX) %p failed errno=%d(%s)",
-                 (void*)page_start, errno, strerror(errno));
+    /* Fallback: mprotect + direct write. Protect only the pages covered by
+     * this jump; a fixed 2-page span fails when a recomp slot sits on the last
+     * mapped page of a tiny trampoline region. */
+    int saved_prot[8] = {0};
+    size_t saved_count = save_range_prot_pages(target, (size_t)jump_len, saved_prot,
+                                               sizeof(saved_prot) / sizeof(saved_prot[0]));
+    if (saved_count == 0 || saved_count > sizeof(saved_prot) / sizeof(saved_prot[0]) ||
+            mprotect_range_pages(target, (size_t)jump_len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        hook_log("[patch_target] mprotect(RWX) %p len=%d failed errno=%d(%s)",
+                 target, jump_len, errno, strerror(errno));
         return HOOK_ERROR_MPROTECT_FAILED;
     }
     jump_result = hook_write_jump(target, jump_dest);
     if (jump_result < 0) {
-        restore_page_prot_span(page_start, first_prot, second_prot);
+        restore_range_prot_pages(target, (size_t)jump_len, saved_prot, saved_count);
         return jump_result;
     }
     entry->stealth = 0;
     entry->original_size = jump_result;
-    restore_page_prot_span(page_start, first_prot, second_prot);
+    restore_range_prot_pages(target, (size_t)jump_len, saved_prot, saved_count);
 
     return 0;
 }

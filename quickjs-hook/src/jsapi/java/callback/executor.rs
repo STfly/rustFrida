@@ -975,10 +975,13 @@ unsafe fn install_message_queue_executor_hook(env: JniEnv) -> bool {
         ));
         return false;
     }
-    super::art_controller::try_fixup_trampoline_pub(
+    if !super::art_controller::try_fixup_trampoline_pub(
         hook_ffi::hook_get_trampoline(hook_addr as *mut std::ffi::c_void),
         poll_addr,
-    );
+    ) {
+        hook_ffi::hook_remove(hook_addr as *mut std::ffi::c_void);
+        return false;
+    }
 
     EXECUTOR_NATIVE_WAKE.store(wake_addr, std::sync::atomic::Ordering::Release);
     EXECUTOR_LOOP_HOOK_TARGET.store(hook_addr, std::sync::atomic::Ordering::Release);
@@ -1045,10 +1048,13 @@ unsafe fn install_handler_dispatch_executor_hook(env: JniEnv) -> bool {
         ));
         return false;
     }
-    super::art_controller::try_fixup_trampoline_pub(
+    if !super::art_controller::try_fixup_trampoline_pub(
         hook_ffi::hook_get_trampoline(hook_addr as *mut std::ffi::c_void),
         entry_point,
-    );
+    ) {
+        hook_ffi::hook_remove(hook_addr as *mut std::ffi::c_void);
+        return false;
+    }
 
     EXECUTOR_HANDLER_HOOK_TARGET.store(hook_addr, std::sync::atomic::Ordering::Release);
     crate::jsapi::console::output_verbose(&format!(

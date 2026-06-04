@@ -679,7 +679,12 @@ static int apply_oat_inline_patch(
 
     uint64_t exec_pc = patch_addr;
     uintptr_t recomp_addr = 0;
-    if (g_stealth_mode == 2 && g_recomp_translate) {
+    if (g_stealth_mode == 2) {
+        if (!g_recomp_translate) {
+            hook_log("\033[31m[STEALTH 失效] oat_patch recomp 回调未设置 %#lx，拒绝降级 mprotect\033[0m",
+                     (unsigned long)patch_addr);
+            return -1;
+        }
         recomp_addr = g_recomp_translate(patch_addr);
         if (!recomp_addr) {
             hook_log("\033[31m[STEALTH 失效] oat_patch recomp 翻译失败 %#lx，patch 未安装！\033[0m",

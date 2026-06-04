@@ -711,6 +711,26 @@ pub fn cleanup_for_unload_leak_safe() -> bool {
     quickjs_hook::recomp::set_cleanup_release_only(true);
     crate::recompiler::release_all();
     stage("phase3 release_all_recomp", &mut t);
+
+    let retained_recomp_ranges = crate::recompiler::get_retained_ranges();
+    if !retained_recomp_ranges.is_empty() {
+        log_msg(format!(
+            "[quickjs] managed-safe safepoint recomp ranges={}\n",
+            retained_recomp_ranges.len()
+        ));
+        if crate::safepoint::wait_until_clean(&retained_recomp_ranges, 2_500) {
+            let (recomp_ok, recomp_fail, recomp_bytes) = unsafe { crate::recompiler::munmap_retained_ranges() };
+            log_msg(format!(
+                "[quickjs] managed-safe munmap recomp: ok={} fail={} bytes={}\n",
+                recomp_ok, recomp_fail, recomp_bytes
+            ));
+            stage("phase3 munmap_retained_recomp", &mut t);
+        } else {
+            log_msg("[quickjs] managed-safe safepoint timeout: keep retained recomp pages mapped\n".to_string());
+            stage("phase3 retained_recomp_leaked", &mut t);
+        }
+    }
+
     free_art_controller_state();
     stage("phase3 free_art_controller_state", &mut t);
 

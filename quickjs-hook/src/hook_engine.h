@@ -146,6 +146,19 @@ int hook_remove(void* target);
 void* hook_get_trampoline(void* target);
 
 /*
+ * Mark an already-installed hook as recomp-backed.
+ *
+ * The hook target is an anonymous recomp slot; removal/cleanup must not
+ * restore it as a normal inline patch because the recomp layer owns route
+ * activation and rollback.
+ */
+int hook_mark_recomp_hook(void* target);
+
+/* Same as hook_mark_recomp_hook(), but finds the hook by its trampoline.
+ * Useful for recomp callers that receive the trampoline after hook_install. */
+int hook_mark_recomp_hook_by_trampoline(void* trampoline);
+
+/*
  * Cleanup and free all hooks
  */
 void hook_engine_cleanup(void);

@@ -542,17 +542,21 @@ int hook_remove(void* target) {
                     hook_log("hook_remove: rw-sibling restore OK target=%p via writable=%p len=%zu",
                              target, writable, (size_t)entry->original_size);
                 } else {
-                    uintptr_t page_start = (uintptr_t)target & ~0xFFF;
-                    int first_prot = page_prot_flags(page_start);
-                    int second_prot = page_prot_flags(page_start + 0x1000);
-                    if (mprotect((void*)page_start, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+                    int saved_prot[8] = {0};
+                    size_t saved_count = save_range_prot_pages(target, (size_t)entry->original_size,
+                                                               saved_prot,
+                                                               sizeof(saved_prot) / sizeof(saved_prot[0]));
+                    if (saved_count == 0 ||
+                            saved_count > sizeof(saved_prot) / sizeof(saved_prot[0]) ||
+                            mprotect_range_pages(target, (size_t)entry->original_size,
+                                                 PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
                         hook_log("hook_remove: mprotect failed target=%p errno=%d, hook remains installed",
                                  target, errno);
                         hook_unlock(&g_engine.lock);
                         return HOOK_ERROR_MPROTECT_FAILED;
                     }
                     memcpy(target, entry->original_bytes, entry->original_size);
-                    restore_page_prot_span(page_start, first_prot, second_prot);
+                    restore_range_prot_pages(target, (size_t)entry->original_size, saved_prot, saved_count);
                     hook_flush_cache(target, entry->original_size);
                 }
             }
@@ -586,4 +590,40 @@ void* hook_get_trampoline(void* target) {
     void* result = entry ? entry->trampoline : NULL;
     hook_unlock(&g_engine.lock);
     return result;
+}
+
+int hook_mark_recomp_hook(void* target) {
+    if (!g_engine.initialized || !target) {
+        return HOOK_ERROR_INVALID_PARAM;
+    }
+
+    hook_lock(&g_engine.lock);
+    HookEntry* entry = find_hook(target);
+    if (!entry) {
+        hook_unlock(&g_engine.lock);
+        return HOOK_ERROR_NOT_FOUND;
+    }
+
+    entry->stealth = 2;
+    hook_unlock(&g_engine.lock);
+    return HOOK_OK;
+}
+
+int hook_mark_recomp_hook_by_trampoline(void* trampoline) {
+    if (!g_engine.initialized || !trampoline) {
+        return HOOK_ERROR_INVALID_PARAM;
+    }
+
+    hook_lock(&g_engine.lock);
+    HookEntry* entry = g_engine.hooks;
+    while (entry) {
+        if (entry->trampoline == trampoline) {
+            entry->stealth = 2;
+            hook_unlock(&g_engine.lock);
+            return HOOK_OK;
+        }
+        entry = entry->next;
+    }
+    hook_unlock(&g_engine.lock);
+    return HOOK_ERROR_NOT_FOUND;
 }

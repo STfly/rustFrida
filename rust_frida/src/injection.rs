@@ -1254,6 +1254,11 @@ fn inject_via_bootstrapper_once(
     let libc_api: FridaLibcApi = mem_read_value(&mem, libc_api_addr)?;
 
     log_verbose!("rtld_flavor: {}", bootstrap_ctx.rtld_flavor);
+    log_verbose!(
+        "platform bases: libc=0x{:x}, linker=0x{:x}",
+        bootstrap_ctx.fallback_libc,
+        bootstrap_ctx.rtld_base
+    );
     log_verbose!("ctrlfds: [{}, {}]", bootstrap_ctx.ctrlfds[0], bootstrap_ctx.ctrlfds[1]);
     log_verbose!("agent linker: 自解析 ELF/重定位/外部符号，不调用 dlopen/dlsym");
     log_verbose!("loader thread: raw clone，不调用 libc pthread");
@@ -1308,6 +1313,8 @@ fn inject_via_bootstrapper_once(
     loader_ctx.libc = loader_libc_addr as u64;
     loader_ctx.string_table_addr = string_table_addr as u64;
     loader_ctx.agent_current_thread_eval = current_thread_eval_str_addr as u64;
+    loader_ctx.libc_base = bootstrap_ctx.fallback_libc;
+    loader_ctx.linker_base = bootstrap_ctx.rtld_base;
     mem_write_value(&mem, loader_ctx_addr, &loader_ctx)?;
 
     // 写入 LibcApi（给 loader 用）

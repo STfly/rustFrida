@@ -1551,11 +1551,9 @@ pub(super) unsafe fn restore_art_method_fields(data: &JavaHookData) {
 /// 移除 Layer 3 per-method inline hook + stealth2 revert_slot_patch。
 pub(super) unsafe fn remove_per_method_hook(data: &JavaHookData) {
     if data.quick_trampoline == 0 {
-        // Standalone shared-stub routers are written directly into ArtMethod.entry_point_.
-        // They are not installed with hook_install_art_router(), so hook_remove(target)
-        // would treat generated pool code as an inline hook site. restore_art_method_fields()
-        // restores entry_point_ to original_entry_point; the generated stub remains owned by
-        // the hook engine pool for the current agent lifetime.
+        // No inline per-method hook was installed. Shared/early-entry methods are routed
+        // through ART trampolines only, and restore_art_method_fields() restores the
+        // original ArtMethod fields.
         return;
     }
 
@@ -1580,6 +1578,7 @@ pub(super) unsafe fn remove_per_method_hook(data: &JavaHookData) {
 /// 移除 registered native fnPtr inline hook。
 pub(super) unsafe fn remove_native_entry_hook(data: &JavaHookData) {
     if data.native_entry_hook_target != 0 {
+        crate::recomp::try_revert_slot_patch_by_slot(data.native_entry_hook_target as usize);
         hook_ffi::hook_remove(data.native_entry_hook_target as *mut std::ffi::c_void);
     }
 }

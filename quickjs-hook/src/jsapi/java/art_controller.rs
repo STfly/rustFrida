@@ -232,7 +232,7 @@ unsafe fn try_fixup_trampoline(trampoline: *mut std::ffi::c_void, orig_addr: u64
 /// 返回 (hook_addr, stealth_flag):
 ///   Normal:   (resolved_addr, 0)
 ///   WxShadow: (resolved_addr, 1)
-///   Recomp:   (recomp(resolved_addr), 2)
+///   Recomp:   (recomp slot, 0)
 ///
 /// jni_env 用于 resolve ART tiny trampoline (LDR+BR)，非 art_router 场景传 null
 ///
@@ -1577,48 +1577,13 @@ unsafe fn synchronize_replacement_methods() {
         }
 
         // --- Fix 2 + existing: entry_point 验证与恢复 ---
-        // 对标 Frida synchronize_replacement_methods: nterp → quick_to_interpreter_bridge
-        let per_method_hook_target = match &data.hook_type {
-            HookType::Replaced {
-                per_method_hook_target, ..
-            }
-            | HookType::Quick {
-                per_method_hook_target, ..
-            }
-            | HookType::Managed {
-                per_method_hook_target, ..
-            } => per_method_hook_target,
-        };
-        if per_method_hook_target.is_none() {
-            // 共享 stub 方法: 如果 GC 重置 entry_point 为 nterp，再降级为 interpreter_bridge
-            if nterp != 0 && interp_bridge != 0 {
-                let current_ep = read_entry_point(data.art_method, ep_offset);
-                if current_ep == nterp {
-                    std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
-                    hook_ffi::hook_flush_cache((art_method + ep_offset) as *mut std::ffi::c_void, 8);
-                }
-            }
-        } else {
-            // 编译方法: entry_point 应为 original_entry_point (已被 inline hook 修改)
-            // Standalone shared-stub routers write their generated stub directly
-            // to entry_point_; in that case per_method_hook_target is the
-            // expected entry value.
-            // 但 GC/类初始化可能将 ep 重置为 nterp → 降级为 interpreter_bridge
+        // Target ArtMethod.entry_point_ must never be restored to hook-pool
+        // code. Only keep the original ART/app entry, or degrade nterp to the
+        // ART interpreter bridge.
+        if nterp != 0 && interp_bridge != 0 {
             let current_ep = read_entry_point(data.art_method, ep_offset);
-            if current_ep != data.original_entry_point && Some(current_ep) != *per_method_hook_target {
-                if let Some(expected_ep) = *per_method_hook_target {
-                    if expected_ep != data.original_entry_point {
-                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, expected_ep);
-                    } else if nterp != 0 && current_ep == nterp && interp_bridge != 0 {
-                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
-                    } else {
-                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, data.original_entry_point);
-                    }
-                } else if nterp != 0 && current_ep == nterp && interp_bridge != 0 {
-                    std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
-                } else {
-                    std::ptr::write_volatile((art_method + ep_offset) as *mut u64, data.original_entry_point);
-                }
+            if current_ep == nterp {
+                std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
                 hook_ffi::hook_flush_cache((art_method + ep_offset) as *mut std::ffi::c_void, 8);
             }
         }

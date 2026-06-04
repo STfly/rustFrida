@@ -121,7 +121,6 @@ unsafe fn install_hook(
 
     let stealth_flag = match mode {
         StealthMode::WxShadow => 1,
-        StealthMode::Recomp => 2,
         _ => 0,
     };
 
@@ -331,7 +330,6 @@ pub(crate) unsafe extern "C" fn js_hook_native(
 
     let stealth_flag = match mode {
         StealthMode::WxShadow => 1,
-        StealthMode::Recomp => 2,
         _ => 0,
     };
     let callback_fn: unsafe extern "C" fn(*mut hook_ffi::HookContext, *mut std::ffi::c_void) =
@@ -505,7 +503,6 @@ pub(crate) unsafe extern "C" fn js_attach_native(
     };
     let stealth_flag = match mode {
         StealthMode::WxShadow => 1,
-        StealthMode::Recomp => 2,
         _ => 0,
     };
     let user_on_enter_fn: Option<NativeHookCallback> = if on_enter_addr == 0 {
@@ -931,7 +928,6 @@ pub(crate) unsafe extern "C" fn js_interceptor_attach(
 
     let stealth_flag = match mode {
         StealthMode::WxShadow => 1,
-        StealthMode::Recomp => 2,
         _ => 0,
     };
 

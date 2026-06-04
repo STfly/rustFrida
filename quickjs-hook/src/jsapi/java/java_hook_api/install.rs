@@ -336,6 +336,7 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
         ep_offset,
         env,
         art_method,
+        is_native_method,
         force_standalone_stub,
         enable_fast_orig,
     ) {
@@ -383,31 +384,35 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
             let Some(hook_data) = registry.get_mut(&art_method) else {
                 return Err("registered native hook data disappeared".to_string());
             };
+            let (hook_addr, sflag) =
+                super::super::art_controller::prepare_hook_target(original_data, std::ptr::null_mut())
+                    .map_err(|e| format!("registered native entry prepare: {}", e))?;
             let trampoline = hook_ffi::hook_replace(
-                original_data as *mut std::ffi::c_void,
+                hook_addr as *mut std::ffi::c_void,
                 native_callback,
                 art_method as *mut std::ffi::c_void,
-                0,
+                sflag,
             );
             if trampoline.is_null() {
                 return Err(format!(
-                    "registered native entry hook failed: target={:#x}",
-                    original_data
+                    "registered native entry hook failed: target={:#x}, hook={:#x}",
+                    original_data, hook_addr
                 ));
             }
-            hook_data.native_entry_hook_target = original_data;
+            super::super::art_controller::try_fixup_trampoline_pub(trampoline, original_data);
+            hook_data.native_entry_hook_target = hook_addr;
             hook_data.native_entry_trampoline = trampoline as u64;
             hook_data.native_entry_critical = is_critical_native;
-            Ok((original_data, trampoline as u64))
+            Ok((original_data, hook_addr, trampoline as u64))
         })
         .unwrap_or_else(|| Err("java hook registry not initialized".to_string()));
 
         match install_native_entry {
-            Ok((target, trampoline)) => {
-                install_guard.set_native_entry_hook_target(target);
+            Ok((target, hook_target, trampoline)) => {
+                install_guard.set_native_entry_hook_target(hook_target);
                 output_verbose(&format!(
-                    "[java hook] registered native entry hooked: target={:#x}, trampoline={:#x}, critical={}",
-                    target, trampoline, is_critical_native
+                    "[java hook] registered native entry hooked: target={:#x}, hook={:#x}, trampoline={:#x}, critical={}",
+                    target, hook_target, trampoline, is_critical_native
                 ));
             }
             Err(msg) => {
@@ -435,9 +440,7 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
         cache_fields_for_class(env, &class_name);
     }
 
-    let strategy = if has_independent_code && quick_trampoline == 0 && per_method_hook_target.is_some() {
-        "compiled+entry_stub"
-    } else if has_independent_code {
+    let strategy = if has_independent_code {
         "compiled+router"
     } else {
         "shared_stub"
@@ -620,6 +623,7 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook_quick(
         ep_offset,
         env,
         art_method,
+        (original_access_flags & K_ACC_NATIVE) != 0,
         is_constructor,
         false,
     ) {

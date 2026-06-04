@@ -950,26 +950,41 @@ unsafe fn install_message_queue_executor_hook(env: JniEnv) -> bool {
         return false;
     }
 
+    let (hook_addr, sflag) = match super::art_controller::prepare_hook_target(poll_addr, std::ptr::null_mut()) {
+        Ok(v) => v,
+        Err(e) => {
+            crate::jsapi::console::output_verbose(&format!(
+                "[java executor] MessageQueue.nativePollOnce prepare failed: target={:#x}, {}",
+                poll_addr, e
+            ));
+            return false;
+        }
+    };
+
     let ret = hook_ffi::hook_attach(
-        poll_addr as *mut std::ffi::c_void,
+        hook_addr as *mut std::ffi::c_void,
         Some(on_message_queue_native_poll_once_enter),
         None,
         std::ptr::null_mut(),
-        0,
+        sflag,
     );
     if ret != 0 {
         crate::jsapi::console::output_verbose(&format!(
-            "[java executor] MessageQueue.nativePollOnce hook failed: target={:#x}, ret={}",
-            poll_addr, ret
+            "[java executor] MessageQueue.nativePollOnce hook failed: target={:#x}, hook={:#x}, ret={}",
+            poll_addr, hook_addr, ret
         ));
         return false;
     }
+    super::art_controller::try_fixup_trampoline_pub(
+        hook_ffi::hook_get_trampoline(hook_addr as *mut std::ffi::c_void),
+        poll_addr,
+    );
 
     EXECUTOR_NATIVE_WAKE.store(wake_addr, std::sync::atomic::Ordering::Release);
-    EXECUTOR_LOOP_HOOK_TARGET.store(poll_addr, std::sync::atomic::Ordering::Release);
+    EXECUTOR_LOOP_HOOK_TARGET.store(hook_addr, std::sync::atomic::Ordering::Release);
     crate::jsapi::console::output_verbose(&format!(
-        "[java executor] MessageQueue loop hook installed: poll={:#x}, wake={:#x}",
-        poll_addr, wake_addr
+        "[java executor] MessageQueue loop hook installed: poll={:#x}, hook={:#x}, wake={:#x}",
+        poll_addr, hook_addr, wake_addr
     ));
     true
 }
@@ -1030,6 +1045,10 @@ unsafe fn install_handler_dispatch_executor_hook(env: JniEnv) -> bool {
         ));
         return false;
     }
+    super::art_controller::try_fixup_trampoline_pub(
+        hook_ffi::hook_get_trampoline(hook_addr as *mut std::ffi::c_void),
+        entry_point,
+    );
 
     EXECUTOR_HANDLER_HOOK_TARGET.store(hook_addr, std::sync::atomic::Ordering::Release);
     crate::jsapi::console::output_verbose(&format!(
@@ -1121,6 +1140,13 @@ pub(crate) fn cut_raw_clone_executor_loop_hook() -> bool {
     let mut removed_all = true;
     let target = EXECUTOR_LOOP_HOOK_TARGET.load(std::sync::atomic::Ordering::Acquire);
     if target != 0 {
+        let reverted = crate::recomp::try_revert_slot_patch_by_slot(target as usize);
+        if reverted {
+            crate::jsapi::console::output_verbose(&format!(
+                "[java executor] MessageQueue reverted recomp slot branch for target={:#x}",
+                target
+            ));
+        }
         let ret = unsafe { hook_ffi::hook_remove(target as *mut std::ffi::c_void) };
         if ret == 0 {
             EXECUTOR_LOOP_HOOK_TARGET.store(0, std::sync::atomic::Ordering::Release);
@@ -1138,6 +1164,13 @@ pub(crate) fn cut_raw_clone_executor_loop_hook() -> bool {
     }
     let handler_target = EXECUTOR_HANDLER_HOOK_TARGET.load(std::sync::atomic::Ordering::Acquire);
     if handler_target != 0 {
+        let reverted = crate::recomp::try_revert_slot_patch_by_slot(handler_target as usize);
+        if reverted {
+            crate::jsapi::console::output_verbose(&format!(
+                "[java executor] Handler.dispatchMessage reverted recomp slot branch for target={:#x}",
+                handler_target
+            ));
+        }
         let ret = unsafe { hook_ffi::hook_remove(handler_target as *mut std::ffi::c_void) };
         if ret == 0 {
             EXECUTOR_HANDLER_HOOK_TARGET.store(0, std::sync::atomic::Ordering::Release);

@@ -1,7 +1,7 @@
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::console::{output_message, output_verbose};
 
-use super::super::art_controller::{cached_thread_top_quick_frame_offset, prepare_hook_target};
+use super::super::art_controller::prepare_hook_target;
 use super::super::art_method::*;
 use super::super::callback::delete_replacement_method;
 use super::super::jni_core::*;
@@ -124,6 +124,7 @@ impl Drop for JavaHookInstallGuard {
             }
 
             if self.native_entry_hook_target != 0 {
+                crate::recomp::try_revert_slot_patch_by_slot(self.native_entry_hook_target as usize);
                 hook_ffi::hook_remove(self.native_entry_hook_target as *mut std::ffi::c_void);
             }
 
@@ -286,28 +287,16 @@ pub(super) unsafe fn install_per_method_router_hook(
     ep_offset: usize,
     env: JniEnv,
     art_method: u64,
+    is_native_method: bool,
     force_standalone_stub: bool,
     enable_fast_orig: bool,
 ) -> Result<(Option<u64>, u64, bool, Option<u64>), String> {
     if has_independent_code {
-        if cached_thread_top_quick_frame_offset().is_none() {
-            let stub = hook_ffi::hook_create_art_router_stub(original_entry_point, ep_offset as u32) as u64;
-            if stub == 0 {
-                return Err(format!(
-                    "hook_create_art_router_stub failed for compiled entry {:#x}",
-                    original_entry_point
-                ));
-            }
-            std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, stub);
-            hook_ffi::hook_flush_cache((art_method as usize + ep_offset) as *mut std::ffi::c_void, 8);
-            output_verbose(&format!(
-                "[java hook] Step 9: compiled entry standalone router installed: ep={:#x} -> stub={:#x} (quick frame offsets unavailable)",
-                original_entry_point, stub
-            ));
-            return Ok((Some(stub), 0, false, Some(stub)));
-        }
-
         // Layer 3: inline hook quickCode 作为快速路径 (直接调用场景)
+        // Do not modify target ArtMethod.entry_point_ for compiled app/framework
+        // methods. Even ART-internal bridge downgrades are observable by some
+        // shells. The quick router patches only the actual quick entry code.
+        let use_fast_orig = enable_fast_orig && !is_native_method;
         let mut hooked_target: *mut std::ffi::c_void = std::ptr::null_mut();
         let (hook_addr, sflag) = prepare_hook_target(original_entry_point as u64, env as *mut std::ffi::c_void)
             .map_err(|e| format!("prepare_hook_target: {}", e))?;
@@ -320,7 +309,7 @@ pub(super) unsafe fn install_per_method_router_hook(
             &mut hooked_target,
             1, // skip_resolve
             0, // no hint — replacement is kAccNative, ART handles it
-            if enable_fast_orig { 1 } else { 0 },
+            if use_fast_orig { 1 } else { 0 },
         );
 
         if trampoline.is_null() {
@@ -354,7 +343,7 @@ pub(super) unsafe fn install_per_method_router_hook(
         Ok((
             Some(actual_hook_target),
             trampoline as u64,
-            enable_fast_orig,
+            use_fast_orig,
             router_thunk_body,
         ))
     } else {
@@ -372,20 +361,26 @@ pub(super) unsafe fn install_per_method_router_hook(
             || (resolved_res != 0 && original_entry_point == resolved_res);
 
         if force_standalone_stub || !is_already_routed {
-            let stub = hook_ffi::hook_create_art_router_stub(original_entry_point, ep_offset as u32) as u64;
-            if stub == 0 {
+            if is_native_method {
+                output_verbose(&format!(
+                    "[java hook] Step 9: native/shared ART entry kept: ep={:#x}; external ArtMethod entry stub disabled",
+                    original_entry_point
+                ));
+                return Ok((None, 0, false, None));
+            }
+            if interp_bridge == 0 {
                 return Err(format!(
-                    "hook_create_art_router_stub failed for shared entry {:#x}",
+                    "shared entry {:#x} requires quick_to_interpreter_bridge; external ArtMethod entry stub disabled",
                     original_entry_point
                 ));
             }
-            std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, stub);
+            std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, interp_bridge);
             hook_ffi::hook_flush_cache((art_method as usize + ep_offset) as *mut std::ffi::c_void, 8);
             output_verbose(&format!(
-                "[java hook] Step 9: standalone shared-stub router installed: ep={:#x} -> stub={:#x}, forced={}",
-                original_entry_point, stub, force_standalone_stub
+                "[java hook] Step 9: shared entry downgraded to ART interpreter bridge: ep={:#x} -> {:#x}, forced={}",
+                original_entry_point, interp_bridge, force_standalone_stub
             ));
-            return Ok((Some(stub), 0, false, Some(stub)));
+            return Ok((None, 0, false, None));
         }
 
         if !is_already_routed && interp_bridge != 0 {

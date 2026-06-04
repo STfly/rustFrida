@@ -128,7 +128,9 @@ pub(crate) struct RustFridaLoaderContext {
     pub(crate) fallback_address: u64, // const char *
     pub(crate) libc: u64,             // FridaLibcApi *
     pub(crate) string_table_addr: u64,
-    pub(crate) agent_current_thread_eval: u64,      // const char *
+    pub(crate) agent_current_thread_eval: u64, // const char *
+    pub(crate) libc_base: u64,
+    pub(crate) linker_base: u64,
     pub(crate) worker: u64,                         // raw-clone tid (runtime, zeroed)
     pub(crate) agent_handle: u64,                   // void * (runtime, zeroed)
     pub(crate) agent_entrypoint_impl: u64,          // fn ptr (runtime, zeroed)

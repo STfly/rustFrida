@@ -72,6 +72,7 @@ pub(in crate::jsapi::java) unsafe fn install_fast_hook_with_env(
         ep_offset,
         env,
         art_method,
+        false,
         method_name == "<init>",
         false,
     )?;

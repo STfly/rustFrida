@@ -940,6 +940,7 @@ unsafe fn install_managed_method_helper(
             ep_offset,
             env,
             art_method,
+            (original_access_flags & K_ACC_NATIVE) != 0,
             true,
             false,
         ) {
@@ -1095,21 +1096,10 @@ unsafe fn install_count_orig_fast_path(
     let mut counter_ptrs = install_native_counter_ptrs(helper_class, counter_fields);
 
     let (per_method_hook_target, quick_trampoline) = if original_is_shared_entrypoint {
-        let stub = crate::ffi::hook::hook_create_count_orig_stub(
-            original_entry_point,
-            counter_ptrs.as_mut_ptr() as *mut *mut u64,
-            counter_ptrs.len() as u32,
-        ) as u64;
-        if stub == 0 {
-            return Err("hook_create_count_orig_stub failed".to_string());
-        }
-        std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, stub);
-        crate::ffi::hook::hook_flush_cache((art_method as usize + ep_offset) as *mut c_void, 8);
-        output_message(&format!(
-            "[managedHook] installed count-orig standalone shared stub {}.{}{} ep={:#x} -> stub={:#x}",
-            class_name, method_name, actual_sig, original_entry_point, stub
+        return Err(format!(
+            "count-orig native fast path for shared ART entry {}.{}{} would require external ArtMethod entry stub; disabled",
+            class_name, method_name, actual_sig
         ));
-        (Some(stub), 0)
     } else {
         let (hook_addr, stealth_flag) =
             super::super::art_controller::prepare_hook_target(original_entry_point, env as *mut std::ffi::c_void)
@@ -1288,8 +1278,9 @@ pub(in crate::jsapi::java) unsafe fn install_managed_dsl_with_env(
             message_capacity,
         });
     }
+    let mut optimized_native_count_orig_installed = false;
     if optimized_native_count_orig {
-        install_count_orig_fast_path(
+        match install_count_orig_fast_path(
             env,
             class_name,
             method_name,
@@ -1298,19 +1289,29 @@ pub(in crate::jsapi::java) unsafe fn install_managed_dsl_with_env(
             is_static,
             &helper_class,
             &generated.fast_tail_orig_counter_fields,
-        )?;
-        refresh_walkstack_sigsegv_guard();
-        return Ok(ManagedDslInstallResult {
-            helper_class,
-            helper_method,
-            helper_signature,
-            uses_orig,
-            optimized_passthrough,
-            optimized_native_count_orig,
-            counters,
-            message_channels,
-            message_capacity,
-        });
+        ) {
+            Ok(_) => {
+                optimized_native_count_orig_installed = true;
+                refresh_walkstack_sigsegv_guard();
+                return Ok(ManagedDslInstallResult {
+                    helper_class,
+                    helper_method,
+                    helper_signature,
+                    uses_orig,
+                    optimized_passthrough,
+                    optimized_native_count_orig: optimized_native_count_orig_installed,
+                    counters,
+                    message_channels,
+                    message_capacity,
+                });
+            }
+            Err(e) => {
+                output_message(&format!(
+                    "[managedHook] native count-orig fast path disabled for {}.{}{}: {}; falling back to generic DSL helper",
+                    class_name, method_name, sig, e
+                ));
+            }
+        }
     }
     let helper_cls = load_dynamic_managed_helper_class(env, generated.dex, &generated.class_name)?;
     register_managed_guard_helpers(env, helper_cls)?;
@@ -1342,7 +1343,7 @@ pub(in crate::jsapi::java) unsafe fn install_managed_dsl_with_env(
         helper_signature,
         uses_orig,
         optimized_passthrough,
-        optimized_native_count_orig,
+        optimized_native_count_orig: optimized_native_count_orig_installed,
         counters,
         message_channels,
         message_capacity,

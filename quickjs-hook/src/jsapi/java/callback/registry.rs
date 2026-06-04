@@ -70,12 +70,13 @@ pub(super) struct JavaHookData {
     /// true = thunk 用 BLR (post-callback dispatch), $orig 可设 fast_orig 标志。
     /// false = thunk 用 BR, $orig 必须走 JNI 路径。
     pub(super) use_blr: bool,
-    /// Registered native method entry hook.
+    /// Registered native method entry hook target passed to hook_engine.
     ///
     /// ART's generic JNI trampoline calls ArtMethod::data_ (the registered
     /// native fnPtr) directly, so shared-stub routing may never see the Java
-    /// invocation. Non-zero means data_ was inline-replaced and $orig must call
-    /// this trampoline instead of re-entering the ArtMethod via JNI.
+    /// invocation. In recomp mode this is the anonymous slot, not the original
+    /// native fnPtr. Non-zero means $orig must call this trampoline instead of
+    /// re-entering the ArtMethod via JNI.
     pub(super) native_entry_hook_target: u64,
     pub(super) native_entry_trampoline: u64,
     /// true when the native entry uses @CriticalNative ABI:

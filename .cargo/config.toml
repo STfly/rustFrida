@@ -1,3 +1,7 @@
+# 基础构建配置 — 平台相关的 linker/ar/rustflags 由 setup_env.py 生成到 config.local.toml
+# 运行: python3 loader/setup_env.py
+[build]
+target = "aarch64-linux-android"
 ##windows
 #[target.aarch64-linux-android]
 #linker = "E:/androidSdk/ndk/25.0.8775105/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android30-clang.cmd"

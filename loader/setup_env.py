@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-setup_env.py — 自动检测本机 NDK，生成 .cargo/config.local.toml
+setup_env.py — 自动检测本机 NDK，生成 .cargo/config.toml
 
 Cargo 的 config.toml 不支持在 linker/rustflags 中展开环境变量，
-因此用此脚本动态生成本地覆盖文件 config.local.toml（已加入 .gitignore）。
+因此用此脚本动态生成配置文件（已加入 .gitignore）。
 
 用法:
     python3 loader/setup_env.py
@@ -43,7 +43,6 @@ def find_ndk():
     if env_ndk and os.path.isdir(env_ndk):
         return env_ndk
 
-    # 按平台猜测默认 SDK 路径
     system = platform.system().lower()
     if system == "darwin":
         ndk_base = os.path.expanduser("~/Library/Android/sdk/ndk")
@@ -73,12 +72,11 @@ def find_ndk():
 
 
 def find_clang_version(prebuilt_dir):
-    """从 prebuilt 目录推断 Clang 主版本号（用于 builtins lib 路径）。
-    
+    """从 prebuilt 目录推断 Clang 主版本号。
+
     注意：aarch64-linux-androidXX-clang 中的 XX 是 API 级别，不是 Clang 版本。
     Clang 版本需要从 lib/clang/XX 目录获取（例如 NDK 27.2 用 Clang 18）。
     """
-    # 查找 lib/clang/XX 或 lib64/clang/XX 目录
     for lib_dir_name in ("lib", "lib64"):
         clang_base = os.path.join(prebuilt_dir, lib_dir_name, "clang")
         if os.path.isdir(clang_base):
@@ -90,7 +88,7 @@ def find_clang_version(prebuilt_dir):
 
 
 def generate_config(ndk_path, host_tag):
-    """生成 .cargo/config.local.toml。"""
+    """生成 .cargo/config.toml。"""
     prebuilt = os.path.join(ndk_path, "toolchains", "llvm", "prebuilt", host_tag)
     bin_dir = os.path.join(prebuilt, "bin")
 
@@ -108,7 +106,6 @@ def generate_config(ndk_path, host_tag):
         print(f"错误: 未找到 sysroot: {sysroot}")
         sys.exit(1)
 
-    # 检测 clang 版本号，定位 builtins 静态库
     clang_ver = find_clang_version(prebuilt)
     if not clang_ver:
         print("错误: 无法检测 Clang 版本号")
@@ -116,32 +113,35 @@ def generate_config(ndk_path, host_tag):
 
     builtins_lib = os.path.join(prebuilt, "lib", "clang", clang_ver, "lib", "baremetal")
     if not os.path.isdir(builtins_lib):
-        # 旧版 NDK 用 lib64 而不是 lib
         builtins_lib = os.path.join(prebuilt, "lib64", "clang", clang_ver, "lib", "baremetal")
     if not os.path.isdir(builtins_lib):
-        print(f"警告: 未找到 builtins 库目录，rustflags 中的 -L 路径可能无效")
+        print("警告: 未找到 builtins 库目录，rustflags 中的 -L 路径可能无效")
 
-    # 写入 config.local.toml
     os.makedirs(CARGO_DIR, exist_ok=True)
-    config_path = os.path.join(CARGO_DIR, "config.local.toml")
+    config_path = os.path.join(CARGO_DIR, "config.toml")
 
-    content = f"""\
-# 由 loader/setup_env.py 自动生成 — 请勿手动编辑
-# NDK: {ndk_path}
-# Host: {host_tag}  Clang: {clang_ver}
-
-[target.aarch64-linux-android]
-linker = "{linker}"
-ar = "{ar}"
-rustflags = ["-l", "clang_rt.builtins-aarch64", "-L", "{builtins_lib}"]
-
-[env]
-CC_aarch64-linux-android = "{linker}"
-BINDGEN_EXTRA_CLANG_ARGS = "--sysroot={sysroot}"
-"""
+    lines = [
+        "# 由 loader/setup_env.py 自动生成 — 请勿手动编辑",
+        f"# NDK: {ndk_path}",
+        f"# Host: {host_tag}  Clang: {clang_ver}",
+        "",
+        "[build]",
+        'target = "aarch64-linux-android"',
+        "",
+        "[target.aarch64-linux-android]",
+        f'linker = "{linker}"',
+        f'ar = "{ar}"',
+        f'rustflags = ["-l", "clang_rt.builtins-aarch64", "-L", "{builtins_lib}"]',
+        "",
+        "[env]",
+        f'CC_aarch64-linux-android = "{linker}"',
+        f'AR_aarch64-linux-android = "{ar}"',
+        f'BINDGEN_EXTRA_CLANG_ARGS = "--sysroot={sysroot}"',
+        "",
+    ]
 
     with open(config_path, "w") as f:
-        f.write(content)
+        f.write("\n".join(lines))
 
     return config_path, builtins_lib
 
@@ -156,7 +156,8 @@ def main():
     print(f"NDK 路径: {ndk_path}")
 
     config_path, builtins_lib = generate_config(ndk_path, host_tag)
-    print(f"Clang:    {os.path.join(ndk_path, 'toolchains', 'llvm', 'prebuilt', host_tag, 'bin', 'aarch64-linux-android33-clang')}")
+    clang = os.path.join(ndk_path, "toolchains", "llvm", "prebuilt", host_tag, "bin", "aarch64-linux-android33-clang")
+    print(f"Clang:    {clang}")
     print(f"Builtins: {builtins_lib}")
     print(f"\n已生成: {config_path}")
     print("\n下一步:")

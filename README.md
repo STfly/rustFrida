@@ -130,6 +130,33 @@ loader shellcode  ──┐
 agent (libagent.so) ┘
 ```
 
+### 快速构建（推荐）
+
+使用 `quickstart.sh` 一键完成所有构建步骤：
+
+```bash
+chmod +x scripts/quickstart.sh
+./scripts/quickstart.sh
+```
+
+该脚本会自动：
+1. ✅ 检查基础工具（git、python3、rustc、cargo）
+2. ✅ 检查 Android ARM64 目标
+3. ✅ 检测 Android NDK（支持 macOS/Linux 默认路径）
+4. ✅ 生成 `.cargo/config.toml` 配置
+5. ✅ 初始化子仓库
+6. ✅ 构建 loader shellcode（bootstrapper + rustfrida-loader）
+7. ✅ 构建 agent（libagent.so）
+8. ✅ 构建 rustfrida 主程序
+
+构建成功后产物位置：
+- `loader/build/bootstrapper.bin`
+- `loader/build/rustfrida-loader.bin`
+- `target/aarch64-linux-android/release/libagent.so`
+- `target/aarch64-linux-android/release/rustfrida`
+
+**修改了 loader C 代码或 agent Rust 代码后，重新运行 quickstart.sh 即可。**
+
 ### 构建前检查清单
 
 在开始构建前，请确认：
@@ -174,7 +201,13 @@ loader 是 bare-metal ARM64 shellcode，被 `rustfrida` 通过 `include_bytes!` 
 | `错误: NDK 目录不存在` | NDK 未安装或路径不对 | 检查 `~/Library/Android/sdk/ndk/` (macOS) 或 `~/Android/Sdk/ndk/` (Linux) |
 | `未找到 clang` | NDK 版本过低 (< 25) | 安装 NDK 25+ 版本 |
 | `invalid argument '-mcmodel=large'` | 编译标志冲突 | 确保使用最新代码（已修复此问题） |
-| `unsupported relocation type: 1031` | 缺少 `-fPIC` 标志 | 运行 `python3 loader/setup_env.py` 重新生成配置 |
+| `unsupported relocation type: 1031` | loader 不支持 TLSDESC 重定位 | 已修复：quickstart.sh 会自动构建包含 TLSDESC 支持的 loader |
+
+**重定位类型 1031 说明**：
+- `R_AARCH64_TLSDESC` (1031) 是 AArch64 线程局部存储（TLS）的动态描述符重定位
+- `libagent.so` 会生成 2 个 TLSDESC 重定位
+- rustfrida-loader 现在支持此类型，会将其设为 0（项目不使用 TLS）
+- 如果你手动构建（不使用 quickstart.sh），确保使用最新的 loader 代码
 
 ### 2. 构建 agent（libagent.so）
 ```bash

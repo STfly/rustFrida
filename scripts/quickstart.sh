@@ -133,6 +133,20 @@ if [ "$NDK_FOUND" = true ]; then
     else
         success "NDK 版本 $NDK_VERSION 符合要求 (>= 25)"
     fi
+    
+    # 添加 NDK 工具链到 PATH（cc-rs 需要）
+    NDK_BIN="$NDK_PATH/toolchains/llvm/prebuilt/$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64/bin"
+    if [ -d "$NDK_BIN" ]; then
+        export PATH="$NDK_BIN:$PATH"
+        success "已添加 NDK 工具链到 PATH"
+        
+        # 创建符号链接（如果不存在）
+        if [ ! -e "$NDK_BIN/aarch64-linux-android-clang" ]; then
+            ln -sf aarch64-linux-android33-clang "$NDK_BIN/aarch64-linux-android-clang"
+            ln -sf aarch64-linux-android33-clang++ "$NDK_BIN/aarch64-linux-android-clang++"
+            success "已创建编译器符号链接"
+        fi
+    fi
 else
     error "未找到 Android NDK"
     echo ""

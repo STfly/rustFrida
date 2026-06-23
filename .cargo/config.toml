@@ -1,17 +1,18 @@
-# 基础构建配置 — 平台相关的 linker/ar/rustflags 由 setup_env.py 生成到 config.local.toml
-# 运行: python3 loader/setup_env.py
-
-[build]
-target = "aarch64-linux-android"
+# 由 loader/setup_env.py 自动生成 — 请勿手动编辑
+# NDK: /Users/sutian/Library/Android/sdk/ndk/27.2.12479018
+# Host: darwin-x86_64  Clang: 18
 
 [target.aarch64-linux-android]
-# 以下字段由 setup_env.py 写入 config.local.toml
-# linker = "..."
-# ar = "..."
-# rustflags = ["-C", "relocation-model=pic", "-C", "code-model=large", ...]
+linker = "/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"
+ar = "/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+rustflags = [
+    "-C", "relocation-model=pic",
+    "-l", "clang_rt.builtins-aarch64",
+    "-L", "/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/lib/clang/18/lib/baremetal"
+]
 
 [env]
-# 以下字段由 setup_env.py 写入 config.local.toml
-# CC_aarch64-linux-android = "..."
-# AR_aarch64-linux-android = "..."
-# BINDGEN_EXTRA_CLANG_ARGS = "..."
+CC_aarch64-linux-android = "/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang"
+AR_aarch64-linux-android = "/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+BINDGEN_EXTRA_CLANG_ARGS = "--sysroot=/Users/sutian/Library/Android/sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
+CFLAGS_aarch64-linux-android = "-fPIC -fno-builtin -fno-stack-protector"

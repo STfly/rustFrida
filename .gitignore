@@ -1,6 +1,6 @@
 /target/
 /loader/build/
-.cargo/config.local.toml
+.cargo/config.toml
 .idea/
 *.md
 *.lock

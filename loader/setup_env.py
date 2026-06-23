@@ -117,9 +117,9 @@ def generate_config(ndk_path, host_tag):
     if not os.path.isdir(builtins_lib):
         print("警告: 未找到 builtins 库目录，rustflags 中的 -L 路径可能无效")
 
-    # 写入 config.local.toml（不要覆盖 config.toml）
+    # 写入 config.toml（覆盖，因为这个文件不应该被提交）
     os.makedirs(CARGO_DIR, exist_ok=True)
-    config_path = os.path.join(CARGO_DIR, "config.local.toml")
+    config_path = os.path.join(CARGO_DIR, "config.toml")
 
     lines = [
         "# 由 loader/setup_env.py 自动生成 — 请勿手动编辑",

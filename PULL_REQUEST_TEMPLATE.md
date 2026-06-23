@@ -163,6 +163,6 @@ case R_AARCH64_TLSDESC:
 
 ---
 
-**提交者**: rustFrida 开发团队  
-**日期**: 2026-01-23  
+**提交者**: https://github.com/STfly/rustFrida
+**日期**: 2026-06-23  
 **相关 Issue**: 无（新发现）

@@ -10,5 +10,6 @@ tools/*_test.js
 tools/*_test.sh
 tools/
 CLAUDE.md
-scripts/
+scripts/*
+!scripts/quickstart.sh
 /.qoder

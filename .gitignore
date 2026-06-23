@@ -1,6 +1,6 @@
 /target/
 /loader/build/
-.cargo/config.toml
+.cargo/config.local.toml
 .idea/
 *.md
 *.lock
@@ -11,3 +11,4 @@ tools/*_test.sh
 tools/
 CLAUDE.md
 scripts/
+/.qoder

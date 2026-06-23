@@ -242,7 +242,7 @@ echo ""
 # ==========================================
 info "构建 agent (libagent.so)..."
 
-if cargo build -p agent --release; then
+if cargo build -p agent --release --target aarch64-linux-android; then
     if [ -f "target/aarch64-linux-android/release/libagent.so" ]; then
         success "agent 构建成功"
         AGENT_SIZE=$(wc -c < target/aarch64-linux-android/release/libagent.so)
@@ -263,7 +263,7 @@ echo ""
 # ==========================================
 info "构建 rustfrida 主程序..."
 
-if cargo build -p rust_frida --release; then
+if cargo build -p rust_frida --release --target aarch64-linux-android; then
     if [ -f "target/aarch64-linux-android/release/rustfrida" ]; then
         success "rustfrida 构建成功"
         MAIN_SIZE=$(wc -c < target/aarch64-linux-android/release/rustfrida)

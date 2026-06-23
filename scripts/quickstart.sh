@@ -173,8 +173,8 @@ info "生成 Cargo 配置..."
 if [ -f "loader/setup_env.py" ]; then
     python3 loader/setup_env.py
     
-    if [ -f ".cargo/config.local.toml" ]; then
-        success "已生成 .cargo/config.local.toml"
+    if [ -f ".cargo/config.toml" ]; then
+        success "已生成 .cargo/config.toml"
     else
         error "配置生成失败"
         exit 1

@@ -117,26 +117,29 @@ def generate_config(ndk_path, host_tag):
     if not os.path.isdir(builtins_lib):
         print("警告: 未找到 builtins 库目录，rustflags 中的 -L 路径可能无效")
 
+    # 写入 config.local.toml（不要覆盖 config.toml）
     os.makedirs(CARGO_DIR, exist_ok=True)
-    config_path = os.path.join(CARGO_DIR, "config.toml")
+    config_path = os.path.join(CARGO_DIR, "config.local.toml")
 
     lines = [
         "# 由 loader/setup_env.py 自动生成 — 请勿手动编辑",
         f"# NDK: {ndk_path}",
         f"# Host: {host_tag}  Clang: {clang_ver}",
         "",
-        "[build]",
-        'target = "aarch64-linux-android"',
-        "",
         "[target.aarch64-linux-android]",
         f'linker = "{linker}"',
         f'ar = "{ar}"',
-        f'rustflags = ["-l", "clang_rt.builtins-aarch64", "-L", "{builtins_lib}"]',
+        'rustflags = [',
+        '    "-C", "relocation-model=pic",',
+        '    "-l", "clang_rt.builtins-aarch64",',
+        f'    "-L", "{builtins_lib}"',
+        "]",
         "",
         "[env]",
         f'CC_aarch64-linux-android = "{linker}"',
         f'AR_aarch64-linux-android = "{ar}"',
         f'BINDGEN_EXTRA_CLANG_ARGS = "--sysroot={sysroot}"',
+        f'CFLAGS_aarch64-linux-android = "-fPIC -fno-builtin -fno-stack-protector"',
         "",
     ]
 

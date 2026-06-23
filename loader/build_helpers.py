@@ -119,13 +119,13 @@ def build_shellcode(cc, ld, objcopy, sources, output_name, extra_cflags=None):
     # Common flags
     cflags = [
         "-target", "aarch64-linux-android33",
-        "-fPIC",
-        "-fno-stack-protector",
-        "-fvisibility=hidden",
+        "-fPIC",                      # 位置无关代码（必须）
+        "-fno-builtin",               # 禁用内置函数
+        "-fno-stack-protector",       # 禁用栈保护
+        "-fvisibility=hidden",        # 隐藏符号
         "-fno-function-sections",
         "-fno-data-sections",
         "-fno-asynchronous-unwind-tables",
-        # "-fno-optimize-strlen",  # GCC only, clang doesn't need it
         "-fomit-frame-pointer",
         "-O2",
         "-Wall",

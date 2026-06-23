@@ -39,6 +39,11 @@ python3 build_helpers.py
 loader 是 bare-metal ARM64 shellcode，被 `rustfrida` 通过 `include_bytes!` 嵌入。**修改 loader C 代码后需重新运行此步。**
 
 ### 2. 构建 agent（libagent.so）
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+rustup target add aarch64-linux-android
+```
 
 ```bash
 cargo build -p agent --release
